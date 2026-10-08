@@ -5,6 +5,8 @@ Docs: https://docs.devin.ai/api-reference/v3/sessions/post-organizations-session
 """
 
 import asyncio
+import json
+import time
 import uuid
 
 import httpx
@@ -71,19 +73,68 @@ class DevinClient:
         max_acu_limit: int,
         structured_output_schema: dict,
     ):
-        return await self._request(
-            "POST",
-            "/sessions",
-            json={
-                "prompt": prompt,
-                "title": title,
-                "repos": repos,
-                "tags": tags,
-                "max_acu_limit": max_acu_limit,
-                "structured_output_schema": structured_output_schema,
-                "structured_output_required": True,
-            },
+        """POST /sessions, deduplicating on ambiguous failures.
+
+        The API has no idempotency keys, so a 5xx or transport error leaves
+        the request's fate unknown. Before retrying we look for a session
+        carrying our `issue-<n>` tag created after this attempt began and
+        adopt it if found, so a retried POST can never double a session.
+        """
+        body = {
+            "prompt": prompt,
+            "title": title,
+            "repos": repos,
+            "tags": tags,
+            "max_acu_limit": max_acu_limit,
+            "structured_output_schema": structured_output_schema,
+            "structured_output_required": True,
+        }
+        issue_tag = next((t for t in tags if t.startswith("issue-")), None)
+        attempt_started = int(time.time()) - 60  # clock-skew buffer
+        delay = 1.0
+        last_error = "unknown"
+        for _ in range(MAX_RETRIES):
+            try:
+                resp = await self._http.post(f"{self._base}/sessions", json=body)
+            except httpx.TransportError as exc:
+                last_error = str(exc)
+            else:
+                if resp.status_code < 400:
+                    return resp.json()
+                if resp.status_code == 429:
+                    # Rejected, not executed: safe to retry immediately.
+                    retry_after = resp.headers.get("retry-after")
+                    await asyncio.sleep(
+                        float(retry_after) if retry_after else delay
+                    )
+                    delay = min(delay * 2, 30)
+                    continue
+                if resp.status_code < 500:
+                    raise DevinAPIError(
+                        f"POST /sessions failed: {resp.status_code} "
+                        f"{resp.text[:200]}"
+                    )
+                last_error = f"{resp.status_code} {resp.text[:200]}"
+            adopted = await self._find_session_by_tag(issue_tag, attempt_started)
+            if adopted is not None:
+                return adopted
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+        raise DevinAPIError(f"POST /sessions failed after retries: {last_error}")
+
+    async def _find_session_by_tag(self, tag: str, created_after: int):
+        """Return a session carrying `tag` created at/after `created_after`."""
+        if not tag:
+            return None
+        qs = {"tags": [tag], "created_after": created_after, "first": 5}
+        resp = await self._request(
+            "GET", "/sessions", params={"qs": json.dumps(qs)}
         )
+        # Verify the tag ourselves: protects against the filter being ignored.
+        for item in resp.get("items", []):
+            if tag in (item.get("tags") or []):
+                return item
+        return None
 
     async def get_session(self, session_id: str):
         return await self._request("GET", f"/sessions/{session_id}")

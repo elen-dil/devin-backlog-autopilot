@@ -56,6 +56,10 @@ Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs, GET /api/v1/m
   (`issue_number WHERE state IN ('queued','running')`) makes the webhook and
   the fallback poller race-safe. Re-labeling after a run closes starts a fresh
   run.
+- **Session creation dedups on tags.** The sessions API has no idempotency
+  keys, so when `POST /sessions` fails ambiguously (5xx or transport error)
+  the client first looks for a session carrying the run's `issue-<n>` tag and
+  adopts it, instead of risking a duplicate session.
 - **Structured output, not log scraping.** Sessions must report
   `outcome`/`summary`/`tests_passed` via Devin's `structured_output_schema`
   before finishing, so state transitions are driven by data, not parsing.
