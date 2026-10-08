@@ -21,17 +21,18 @@ def render():
         st.error(f"API unreachable at {API}: {exc}")
         return
 
-    cols = st.columns(5)
+    cols = st.columns(6)
     cols[0].metric("Merge rate", f"{metrics['merge_rate']:.0%}")
-    cols[1].metric("PR rate", f"{metrics['pr_rate']:.0%}")
-    cols[2].metric(
+    cols[1].metric("Resolution rate", f"{metrics['resolution_rate']:.0%}")
+    cols[2].metric("PR rate", f"{metrics['pr_rate']:.0%}")
+    cols[3].metric(
         "Median latency",
         f"{metrics['median_latency_minutes']:.1f} min"
         if metrics["median_latency_minutes"] is not None
         else "n/a",
     )
-    cols[3].metric("Total ACUs", f"{metrics['total_acus']:.1f}")
-    cols[4].metric(
+    cols[4].metric("Total ACUs", f"{metrics['total_acus']:.1f}")
+    cols[5].metric(
         "ACUs per merged fix",
         f"{metrics['acus_per_merged_fix']:.1f}"
         if metrics["acus_per_merged_fix"] is not None

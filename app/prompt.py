@@ -39,9 +39,9 @@ Rules:
 - Work only in the {repo} fork. Keep the change minimal and scoped to this issue.
 - First reproduce or confirm the finding against master. If you cannot confirm
   it still exists, report outcome "not_reproducible" and stop.
-- Use test-driven development: write a failing test that demonstrates the
-  issue, then implement the fix. Do not open a pull request until the new
-  test passes.
+- Use test-driven development where practical: write a failing test that
+  demonstrates the issue, then implement the fix. Do not open a pull
+  request until the relevant tests pass.
 - Open the PR against the master branch and include "Fixes #{issue_number}"
   in the PR description.
 - Never merge the PR.

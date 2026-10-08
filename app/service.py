@@ -154,7 +154,12 @@ class AutopilotService:
                 logger.exception("poll failed for session %s", run["session_id"])
                 continue
             if session_is_terminal(session.get("status"), session.get("status_detail")):
-                await self._finalize(run, session)
+                try:
+                    await self._finalize(run, session)
+                except Exception:
+                    # One poisoned run must not starve the others; the tick
+                    # retries it next pass.
+                    logger.exception("finalize failed for run %s", run["id"])
 
     async def _finalize(self, run: dict, session: dict) -> None:
         # Only the session poll loop calls this, and its ticks run serially,
@@ -193,6 +198,13 @@ class AutopilotService:
             blockers = _append(blockers, reason)
             outcome = outcome or "needs_human"
 
+        # Remove the trigger/running labels BEFORE the state update. Once the
+        # run leaves an active state the issue poller may adopt it again, so
+        # the trigger label must be gone first. Removal is idempotent
+        # (404-tolerant), so a retry after a mid-finalize crash is safe.
+        await self._github.remove_label(issue_number, self._s.trigger_label)
+        await self._github.remove_label(issue_number, self._s.running_label)
+
         self._store.update(
             run["id"],
             state=state,
@@ -207,8 +219,6 @@ class AutopilotService:
             finished_at=_now(),
         )
 
-        await self._github.remove_label(issue_number, self._s.trigger_label)
-        await self._github.remove_label(issue_number, self._s.running_label)
         if label:
             await self._github.add_label(issue_number, label)
         await self._github.comment(
@@ -273,13 +283,19 @@ def compute_metrics(runs) -> dict:
 
     total_acus = sum(r["acus"] or 0 for r in runs)
 
+    finished = merged + by_state.get("pr_open", 0) + by_state.get(
+        "needs_human", 0
+    ) + by_state.get("failed", 0)
+
     return {
         "total_runs": total,
         "by_state": by_state,
         # pr_rate: fraction of all runs that produced a PR.
         "pr_rate": pr_opened / total if total else 0.0,
-        # merge_rate: fraction of all runs whose PR was merged.
-        "merge_rate": merged / total if total else 0.0,
+        # merge_rate: of the PRs Devin opened, how many were merged.
+        "merge_rate": merged / pr_opened if pr_opened else 0.0,
+        # resolution_rate: of finished runs, how many shipped a merged fix.
+        "resolution_rate": merged / finished if finished else 0.0,
         "median_latency_minutes": median_latency,
         "total_acus": total_acus,
         "acus_per_merged_fix": (total_acus / merged) if merged else None,

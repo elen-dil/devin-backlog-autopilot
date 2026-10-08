@@ -25,21 +25,40 @@ class DevinClient:
         )
 
     async def _request(self, method: str, path: str, **kwargs):
-        """Retry with exponential backoff on 429/5xx, honoring Retry-After."""
+        """Retry with exponential backoff, honoring Retry-After.
+
+        429 is retried for all methods (the request was rejected, not
+        executed). 5xx and transport errors are retried for GET only: the
+        sessions API has no idempotency keys, so retrying a POST could
+        create a duplicate session server-side.
+        """
         delay = 1.0
         resp = None
         for _ in range(MAX_RETRIES):
-            resp = await self._http.request(method, f"{self._base}{path}", **kwargs)
+            try:
+                resp = await self._http.request(
+                    method, f"{self._base}{path}", **kwargs
+                )
+            except httpx.TransportError as exc:
+                if method != "GET":
+                    raise DevinAPIError(f"{method} {path} failed: {exc}") from exc
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
             if resp.status_code < 400:
                 return resp.json()
-            if resp.status_code == 429 or resp.status_code >= 500:
+            if resp.status_code == 429 or (
+                method == "GET" and resp.status_code >= 500
+            ):
                 retry_after = resp.headers.get("retry-after")
                 await asyncio.sleep(float(retry_after) if retry_after else delay)
                 delay = min(delay * 2, 30)
                 continue
             break
         raise DevinAPIError(
-            f"{method} {path} failed after retries: {resp.status_code} {resp.text[:200]}"
+            f"{method} {path} failed after retries: "
+            f"{resp.status_code if resp is not None else 'no response'} "
+            f"{resp.text[:200] if resp is not None else ''}"
         )
 
     async def create_session(

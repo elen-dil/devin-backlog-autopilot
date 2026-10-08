@@ -115,7 +115,7 @@ curl -X POST localhost:8000/simulate/issue \
 
 - `POST /webhooks/github` - GitHub `issues` events (`labeled` -> enqueue), `ping`, HMAC-SHA256 verified
 - `GET /api/v1/runs` - all runs with session/PR links, outcomes, ACUs
-- `GET /api/v1/metrics` - counts by state, PR rate, merge rate, median start-to-finish latency, total ACUs, ACUs per merged fix
+- `GET /api/v1/metrics` - counts by state, PR rate, merge rate (merged / PRs opened), resolution rate (merged / finished runs), median start-to-finish latency, total ACUs, ACUs per merged fix
 - `POST /simulate/issue` - inject an issue (SIMULATE only)
 - `GET /healthz`
 

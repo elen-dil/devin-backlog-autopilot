@@ -1,10 +1,22 @@
 import asyncio
 
+from app.github import NullGitHubClient
 from app.service import AutopilotService
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+class FlakyRemoveGitHub(NullGitHubClient):
+    """Fails remove_label while fail_remove is set."""
+
+    fail_remove = True
+
+    async def remove_label(self, issue_number, label):
+        if self.fail_remove:
+            raise RuntimeError("github unavailable")
+        await super().remove_label(issue_number, label)
 
 
 def _drive(service, issue_number, polls=3):
@@ -71,6 +83,31 @@ def test_suspended_at_acu_cap_becomes_needs_human(settings, components):
     )
     assert "usage_limit_exceeded" in finish_comment
     assert ("add_label", 3, "devin-needs-human") in github.events
+
+
+def test_failed_label_removal_keeps_run_active(settings, components):
+    """If label removal fails, the run must stay 'running' so the issue
+    poller cannot re-trigger a second session for it."""
+    store, devin, _ = components
+    github = FlakyRemoveGitHub()
+    service = AutopilotService(settings, store, devin, github)
+
+    run(service.enqueue_issue(4, "t", "https://x/4", "body"))
+    run(service.dispatch_tick())
+    # Session reaches terminal; finalize raises inside label removal.
+    run(service.session_poll_tick())
+    run(service.session_poll_tick())
+
+    run_row = store.by_state("running")[0]
+    assert run_row["issue_number"] == 4
+    # The issue poller sees the trigger label still on, but must not be
+    # able to start a second run for it.
+    assert run(service.enqueue_issue(4, "t", "https://x/4", "body")) == "already_active"
+
+    github.fail_remove = False
+    run(service.session_poll_tick())
+    assert store.get(run_row["id"])["state"] == "pr_open"
+    assert ("remove_label", 4, "devin-remediate") in github.events
 
 
 def test_dispatch_respects_concurrency_cap(settings, components):
