@@ -8,6 +8,7 @@ leaves an active state, the issue can be re-triggered by re-applying the
 trigger label.
 """
 
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -49,6 +50,9 @@ def _now() -> str:
 
 class RunStore:
     def __init__(self, path: str):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
