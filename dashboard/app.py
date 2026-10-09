@@ -324,18 +324,22 @@ def render_banner(health, metrics):
 
 
 def _kpi_tile(label, value, help_text):
-    """Render one KPI tile as HTML with a native title tooltip.
+    """Render one KPI tile as HTML with a CSS ::after tooltip.
 
     Streamlit's `help=` tooltips live in a portal that can outlive its anchor
     when the auto-refresh fragment recreates the metric DOM, leaving orphan
-    tooltip boxes that overlap newer ones. A native `title` tooltip is bound
-    to the element itself, so it can never be orphaned.
+    tooltip boxes that overlap newer ones. A native `title` tooltip stays
+    bound to its element but is painted by the browser chrome: it carries a
+    hover delay, can be canceled when the fragment refresh recreates the DOM
+    mid-hover, and does not render at all in some embedded views. A CSS
+    ::after tooltip renders inside the page, so it has none of those issues
+    while remaining bound to the element.
     """
     tip = html.escape(help_text, quote=True)
     return (
         '<div class="kpi">'
         f'<div class="kpi-label">{html.escape(label)}'
-        f'<span class="kpi-help" title="{tip}">?</span></div>'
+        f'<span class="kpi-help" data-tip="{tip}">?</span></div>'
         f'<div class="kpi-value">{html.escape(value)}</div>'
         "</div>"
     )
@@ -786,7 +790,10 @@ st.markdown(
     """<style>
 .block-container{padding-top:1.75rem;padding-bottom:1rem;}
 .kpi-label{font-size:.875rem;color:rgba(49,51,63,.6);display:flex;align-items:center;gap:.35rem;}
-.kpi-help{display:inline-flex;align-items:center;justify-content:center;width:.95rem;height:.95rem;border-radius:50%;border:1px solid rgba(49,51,63,.45);font-size:.62rem;color:rgba(49,51,63,.55);cursor:help;}
+.kpi-help{position:relative;display:inline-flex;align-items:center;justify-content:center;width:.95rem;height:.95rem;border-radius:50%;border:1px solid rgba(49,51,63,.45);font-size:.62rem;color:rgba(49,51,63,.55);cursor:help;}
+.kpi-help::after{content:attr(data-tip);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);width:max-content;max-width:15rem;white-space:normal;text-align:left;background:#31333F;color:#fff;font-size:.75rem;font-weight:400;line-height:1.45;padding:.45rem .6rem;border-radius:.375rem;box-shadow:0 4px 12px rgba(0,0,0,.18);opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:100;}
+.kpi-help::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:4px solid transparent;border-bottom-color:#31333F;opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:100;}
+.kpi-help:hover::after,.kpi-help:hover::before{opacity:1;visibility:visible;}
 .kpi-value{font-size:1.55rem;font-weight:400;color:#31333F;line-height:1.4;}
 </style>""",
     unsafe_allow_html=True,
