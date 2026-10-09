@@ -45,7 +45,15 @@ Rules:
 - Open the PR against the master branch and include "Fixes #{issue_number}"
   in the PR description.
 - Never merge the PR.
-- If a human decision is needed, add the label "{needs_human_label}" to the
-  issue, report outcome "needs_human", explain in "blockers", and stop.
+- Mark outcome "needs_human" and do not open a PR if the fix requires any
+  of the following:
+  - a major-version upgrade of a dependency, or removal of supported
+    behavior/protocols (a breaking change),
+  - a dependency version published less than 30 days ago, or one without
+    verifiable provenance,
+  - changes to auth, crypto, or network-security defaults beyond the
+    issue's stated scope.
+  In that case add the label "{needs_human_label}" to the issue, explain
+  which rule applied in "blockers", and stop.
 - Before finishing, report your result via the structured output tool.
 """
