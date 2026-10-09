@@ -370,7 +370,7 @@ def render_kpis(metrics, runs):
             help=f"Sum of ACUs consumed across all runs. {ACU_HELP}",
         )
         per_fix_col.metric(
-            "ACUs per merged fix",
+            "ACUs / merged fix",
             fmt_number(metrics.get("acus_per_merged_fix")),
             help="Total ACUs ÷ merged fixes. Includes compute spent on runs "
             f"that did not merge. {ACU_HELP}",
@@ -465,10 +465,18 @@ def render_runs_table(runs):
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "Session": st.column_config.LinkColumn("Session", display_text="Open"),
-            "PR": st.column_config.LinkColumn("PR", display_text="Open"),
+            "Issue": st.column_config.TextColumn(width=210),
+            "Status": st.column_config.TextColumn(width=130),
+            "Time to result": st.column_config.TextColumn(width=90),
+            "ACUs": st.column_config.TextColumn(width=55),
+            "Session": st.column_config.LinkColumn(
+                "Session", display_text="Open", width=70
+            ),
+            "PR": st.column_config.LinkColumn(
+                "PR", display_text="Open", width=45
+            ),
             "Details": st.column_config.ButtonColumn(
-                "Details", key="run_detail_click", width="small"
+                "Details", key="run_detail_click", width=70
             ),
         },
         height=height,
@@ -716,7 +724,8 @@ st.set_page_config(page_title="Devin Backlog Autopilot", layout="wide")
 # Tighten Streamlit's default page padding so the KPI row plus the Overview
 # tab fit a ~1440x900 laptop screen without scrolling.
 st.markdown(
-    "<style>.block-container{padding-top:1.75rem;padding-bottom:1rem;}</style>",
+    "<style>.block-container{padding-top:1.75rem;padding-bottom:1rem;}"
+    "[data-testid='stMetricValue']{font-size:1.55rem;}</style>",
     unsafe_allow_html=True,
 )
 st.title("Devin Backlog Autopilot")
