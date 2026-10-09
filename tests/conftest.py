@@ -34,6 +34,7 @@ def settings(tmp_path):
         merge_check_seconds=300,
         dispatch_seconds=5,
         database_path=str(tmp_path / "autopilot.db"),
+        acu_backfill_seconds=60,
     )
 
 

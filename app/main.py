@@ -63,6 +63,9 @@ def create_app(
                 asyncio.create_task(
                     _loop(service.merge_check_tick, settings.merge_check_seconds)
                 ),
+                asyncio.create_task(
+                    _loop(service.acu_backfill_tick, settings.acu_backfill_seconds)
+                ),
             ]
             if not settings.simulate:
                 # Polling labeled issues is the only ingress; simulate mode

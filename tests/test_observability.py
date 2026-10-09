@@ -102,7 +102,8 @@ def test_run_events_cover_full_lifecycle(settings, components):
     assert any(d.startswith("comment result") for d in writes)
     last_write = max(i for i, n in enumerate(names) if n == "github_write")
     assert names.index("finalized") < last_write
-    assert names[-1] == "github_write"
+    # Finalize terminates the still-running session as its last step.
+    assert names[-1] == "session_terminated"
 
 
 def test_run_detail_and_events_endpoints(settings, components):
@@ -191,10 +192,14 @@ def test_metrics_hand_computed(settings, components):
         "median_label_to_result_minutes",
         "median_label_to_pr_minutes",
         "total_acus",
+        "acus_pending",
         "acus_per_run",
         "acus_per_pr",
         "acus_per_merged_fix",
         "runs_at_cap",
+        "total_session_minutes",
+        "session_minutes_per_run",
+        "session_minutes_per_merged_fix",
     }
     assert m["total_runs"] == 5
     assert m["by_state"] == {
@@ -227,6 +232,11 @@ def test_metrics_hand_computed(settings, components):
     assert m["acus_per_run"] == 19 / 4
     assert m["acus_per_pr"] == 19 / 2
     assert m["acus_per_merged_fix"] == 19
+    assert m["acus_pending"] == 0
+    # session minutes 60 + 30 + 30 + 40 across the four finished runs
+    assert m["total_session_minutes"] == 160
+    assert m["session_minutes_per_run"] == 40
+    assert m["session_minutes_per_merged_fix"] == 160
     assert m["runs_at_cap"] == 1
 
 
