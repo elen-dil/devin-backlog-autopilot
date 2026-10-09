@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS runs (
     acus REAL,
     output_json TEXT,
     error TEXT,
+    is_simulated INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT,
@@ -41,6 +42,14 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_issue
     ON runs (issue_number) WHERE state IN ('queued', 'running');
+CREATE TABLE IF NOT EXISTS run_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    event TEXT NOT NULL,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events (run_id);
 """
 
 
@@ -58,15 +67,46 @@ class RunStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # Databases created before is_simulated existed get it here.
+            cols = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()
+            }
+            if "is_simulated" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN"
+                    " is_simulated INTEGER NOT NULL DEFAULT 0"
+                )
+                # Simulated sessions always get devin-sim-* ids from
+                # SimulatedDevinClient; mark their rows retroactively.
+                self._conn.execute(
+                    "UPDATE runs SET is_simulated = 1"
+                    " WHERE session_id LIKE 'devin-sim-%'"
+                )
+                self._conn.commit()
 
-    def enqueue(self, issue_number: int, title: str, issue_url: str, issue_body: str):
+    def enqueue(
+        self,
+        issue_number: int,
+        title: str,
+        issue_url: str,
+        issue_body: str,
+        is_simulated: bool = False,
+    ):
         """Insert a queued run. Returns the run id, or None if one is already active."""
         with self._lock:
             try:
                 cur = self._conn.execute(
-                    "INSERT INTO runs (issue_number, title, issue_url, issue_body, created_at)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (issue_number, title, issue_url, issue_body, _now()),
+                    "INSERT INTO runs (issue_number, title, issue_url, issue_body,"
+                    " is_simulated, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        issue_number,
+                        title,
+                        issue_url,
+                        issue_body,
+                        1 if is_simulated else 0,
+                        _now(),
+                    ),
                 )
                 self._conn.commit()
                 return cur.lastrowid
@@ -106,6 +146,24 @@ class RunStore:
         ).fetchone()
         return n
 
-    def all(self):
-        rows = self._conn.execute("SELECT * FROM runs ORDER BY id DESC").fetchall()
+    def all(self, include_simulated: bool = True):
+        query = "SELECT * FROM runs"
+        if not include_simulated:
+            query += " WHERE is_simulated = 0"
+        rows = self._conn.execute(f"{query} ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def add_event(self, run_id: int, event: str, detail: str | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO run_events (run_id, timestamp, event, detail)"
+                " VALUES (?, ?, ?, ?)",
+                (run_id, _now(), event, detail),
+            )
+            self._conn.commit()
+
+    def events_for(self, run_id: int):
+        rows = self._conn.execute(
+            "SELECT * FROM run_events WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
         return [dict(r) for r in rows]

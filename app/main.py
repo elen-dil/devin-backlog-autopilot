@@ -109,17 +109,34 @@ def create_app(
                     issue["title"],
                     issue["html_url"],
                     issue.get("body") or "",
+                    source="webhook",
                 )
                 return {"result": result}
         return {"result": "ignored"}
 
     @app.get("/api/v1/runs")
     async def list_runs():
-        return {"runs": store.all()}
+        # Outside SIMULATE mode, hide simulated runs so metrics reflect reality.
+        return {"runs": store.all(include_simulated=settings.simulate)}
+
+    @app.get("/api/v1/runs/{run_id}")
+    async def get_run(run_id: int):
+        run = store.get(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"run": run}
+
+    @app.get("/api/v1/runs/{run_id}/events")
+    async def run_events(run_id: int):
+        if store.get(run_id) is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"events": store.events_for(run_id)}
 
     @app.get("/api/v1/metrics")
     async def metrics():
-        return compute_metrics(store.all())
+        return compute_metrics(
+            store.all(include_simulated=settings.simulate), settings
+        )
 
     @app.get("/healthz")
     async def healthz():
@@ -139,7 +156,7 @@ def create_app(
                 devin.plan_outcome(issue.number, issue.outcome)
             url = f"https://github.com/{settings.github_repo}/issues/{issue.number}"
             result = await service.enqueue_issue(
-                issue.number, issue.title, url, issue.body
+                issue.number, issue.title, url, issue.body, source="simulate"
             )
             return {"result": result}
 

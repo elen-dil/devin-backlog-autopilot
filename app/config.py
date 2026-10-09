@@ -12,6 +12,11 @@ def _bool(name: str) -> bool:
     return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
 
+def _float(name: str) -> float | None:
+    raw = os.environ.get(name, "")
+    return float(raw) if raw else None
+
+
 @dataclass
 class Settings:
     simulate: bool
@@ -31,6 +36,7 @@ class Settings:
     merge_check_seconds: int
     dispatch_seconds: int
     database_path: str
+    acu_price_usd: float | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,6 +58,7 @@ class Settings:
             merge_check_seconds=_int("MERGE_CHECK_SECONDS", 300),
             dispatch_seconds=_int("DISPATCH_SECONDS", 5),
             database_path=os.environ.get("DATABASE_PATH", "./data/autopilot.db"),
+            acu_price_usd=_float("ACU_PRICE_USD"),
         )
 
     def validate(self) -> None:
