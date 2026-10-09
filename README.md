@@ -118,7 +118,7 @@ curl -X POST localhost:8000/simulate/issue \
 ## Dashboard
 
 Streamlit app on :8501, reads only from the FastAPI API (never SQLite directly),
-auto-refreshes every 10s. A compact banner shows LIVE vs SIMULATE MODE plus the
+auto-refreshes every `DASHBOARD_REFRESH_SECONDS` (default 10s). A compact banner shows LIVE vs SIMULATE MODE plus the
 repo and last-refresh time. Everything is designed to fit one laptop screen.
 
 An always-visible KPI row groups the headline numbers:

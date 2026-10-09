@@ -54,6 +54,15 @@ ACU_HELP = (
 TABLE_ROW_HEIGHT = 35
 TABLE_MAX_ROWS = 8
 
+# Auto-refresh cadence for the dashboard fragment. An invalid or
+# non-positive value falls back to 10s rather than crashing the page.
+try:
+    REFRESH_SECONDS = float(os.environ.get("DASHBOARD_REFRESH_SECONDS", "10"))
+    if REFRESH_SECONDS <= 0:
+        raise ValueError
+except ValueError:
+    REFRESH_SECONDS = 10.0
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -238,13 +247,18 @@ def friendly_event(event):
 
 def short_title(run, limit=48):
     title = (run.get("title") or "").strip()
-    return title if len(title) <= limit else title[: limit - 1] + "…"
+    if limit is None or len(title) <= limit:
+        return title
+    # Cut at a word boundary so labels don't end mid-word; a hard cut is
+    # the fallback when no space fits inside the limit.
+    cut = title[: limit - 1].rsplit(" ", 1)[0] or title[: limit - 1]
+    return cut + "…"
 
 
-def issue_ref(run):
+def issue_ref(run, limit=48):
     number = run.get("issue_number")
     prefix = f"#{number}" if number is not None else f"run {run.get('id')}"
-    return f"{prefix} {short_title(run)}".strip()
+    return f"{prefix} {short_title(run, limit)}".strip()
 
 
 def parse_output(run):
@@ -434,7 +448,11 @@ def render_funnel(metrics, runs):
         alt.Chart(df)
         .mark_bar()
         .encode(
-            x=alt.X("Count:Q", title="Issues"),
+            x=alt.X(
+                "Count:Q",
+                title="Issues",
+                axis=alt.Axis(format="d", tickMinStep=1),
+            ),
             y=alt.Y(
                 "Stage:N",
                 sort=alt.EncodingSortField(field="order", order="ascending"),
@@ -494,7 +512,9 @@ def render_runs_table(runs):
     df = pd.DataFrame(
         [
             {
-                "Issue": issue_ref(r),
+                # Full title in the cell; the grid ellipsizes overflow, so
+                # truncating here too would lose the tail twice.
+                "Issue": issue_ref(r, limit=None),
                 "Status": state_label(r.get("state")),
                 # For unfinished runs this column shows elapsed time instead.
                 "Time to result": fmt_delta(
@@ -521,7 +541,7 @@ def render_runs_table(runs):
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "Issue": st.column_config.TextColumn(width=190),
+            "Issue": st.column_config.TextColumn(width=320),
             "Status": st.column_config.TextColumn(width=120),
             "Time to result": st.column_config.TextColumn(width=85),
             "ACUs": st.column_config.TextColumn(width=50),
@@ -541,7 +561,7 @@ def render_runs_table(runs):
     )
 
     # ButtonColumn clicks are transient (set only during the click rerun), so
-    # the 10s fragment refresh never reopens a dismissed dialog.
+    # the fragment auto-refresh never reopens a dismissed dialog.
     click = st.session_state.get("run_detail_click")
     if click is not None:
         run_detail_dialog(ordered[click["row"]])
@@ -559,7 +579,7 @@ def render_runs_table(runs):
 
 @st.dialog("Run details", width="large")
 def run_detail_dialog(run):
-    st.markdown(f"##### {issue_ref(run)}")
+    st.markdown(f"##### {issue_ref(run, limit=None)}")
 
     links = []
     if run.get("issue_url"):
@@ -661,24 +681,54 @@ def render_trends(metrics, runs):
                 df["Finished"].dt.tz_convert(DISPLAY_TZ).dt.tz_localize(None)
             )
             span = df["Finished"].max() - df["Finished"].min()
-            time_format = (
-                "%H:%M" if span < pd.Timedelta(hours=24) else "%b %d %H:%M"
+            # Bucket by hour within a day, by day beyond that. A cumulative
+            # line was tried first but renders as a vertical spike whenever
+            # several runs share a finish time.
+            freq, time_format = (
+                ("h", "%H:%M")
+                if span < pd.Timedelta(hours=24)
+                else ("D", "%b %d")
             )
+            df["Bucket"] = df["Finished"].dt.floor(freq)
+            # Reindex over the full bucket range so empty periods show as
+            # gaps instead of being silently skipped.
+            counts = (
+                df.groupby("Bucket")
+                .size()
+                .reindex(
+                    pd.date_range(
+                        df["Bucket"].min(), df["Bucket"].max(), freq=freq
+                    ),
+                    fill_value=0,
+                )
+                .rename("Completed")
+                .rename_axis("Bucket")
+                .reset_index()
+            )
+            axis = alt.Axis(format=time_format)
+            if freq == "D":
+                # Auto ticks land mid-day and format to the same "%b %d"
+                # label repeatedly; one tick per day avoids the duplicates.
+                axis.tickCount = "day"
             chart = (
-                alt.Chart(df)
-                .mark_line(point=True)
+                alt.Chart(counts)
+                .mark_bar()
                 .encode(
                     x=alt.X(
-                        "Finished:T",
+                        "Bucket:T",
                         title=f"Finished at ({DISPLAY_TZ_NAME})",
-                        axis=alt.Axis(format=time_format),
+                        axis=axis,
                     ),
-                    y=alt.Y("Completed:Q", title="Runs completed"),
+                    y=alt.Y(
+                        "Completed:Q",
+                        title="Runs completed",
+                        axis=alt.Axis(format="d", tickMinStep=1),
+                    ),
                     tooltip=[
                         alt.Tooltip(
-                            "Finished:T",
+                            "Bucket:T",
                             title="Finished at",
-                            format="%b %d %H:%M:%S",
+                            format="%b %d %H:%M",
                         ),
                         alt.Tooltip("Completed:Q", title="Runs completed"),
                     ],
@@ -708,7 +758,11 @@ def render_trends(metrics, runs):
                 alt.Chart(df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("Runs:Q", title="Runs"),
+                    x=alt.X(
+                        "Runs:Q",
+                        title="Runs",
+                        axis=alt.Axis(format="d", tickMinStep=1),
+                    ),
                     y=alt.Y("Outcome:N", sort="-x", title=None),
                     tooltip=["Outcome", "Runs"],
                 )
@@ -750,9 +804,10 @@ def render_cost(metrics, runs):
         axis=alt.Axis(labelLimit=340, labelOverlap=False),
     )
     base = alt.Chart(df).mark_bar().encode(
-        x=alt.X("ACUs:Q"), y=y, tooltip=["Run", "ACUs"]
+        x=alt.X("ACUs:Q", title="ACUs"), y=y, tooltip=["Run", "ACUs"]
     )
     layers = [base]
+    chart_height = max(160, 26 * len(billable))
     if cap is not None:
         layers.append(
             alt.Chart(df)
@@ -760,13 +815,34 @@ def render_cost(metrics, runs):
             .transform_filter(alt.datum.at_cap == True)  # noqa: E712
             .encode(x=alt.X("ACUs:Q"), y=y, tooltip=["Run", "ACUs"])
         )
+        # Fixed color so the cap line and its label read on both light and
+        # dark Streamlit themes; the theme's default rule color does not.
+        # The label sits inside the bottom-left of the line: bars are sorted
+        # longest-first, so the bottom row has the most open space next to
+        # the cap. The cap layers reuse the "ACUs" title so the shared x
+        # axis keeps its name instead of merging to "ACUs, cap".
+        cap_df = pd.DataFrame({"cap": [cap]})
         layers.append(
-            alt.Chart(pd.DataFrame({"cap": [cap]}))
-            .mark_rule(strokeDash=[6, 4])
-            .encode(x="cap:Q")
+            alt.Chart(cap_df)
+            .mark_rule(strokeDash=[6, 4], color="#E45756")
+            .encode(x=alt.X("cap:Q", title="ACUs"))
+        )
+        layers.append(
+            alt.Chart(cap_df)
+            .mark_text(
+                text="cap (MAX_ACU_PER_SESSION)",
+                align="right",
+                dx=-6,
+                baseline="bottom",
+                color="#E45756",
+            )
+            .encode(
+                x=alt.X("cap:Q", title="ACUs"),
+                y=alt.value(chart_height - 8),
+            )
         )
     st.altair_chart(
-        alt.layer(*layers).properties(height=max(160, 26 * len(billable))),
+        alt.layer(*layers).properties(height=chart_height),
         width="stretch",
     )
     if cap is not None:
@@ -801,7 +877,7 @@ st.markdown(
 st.title("Devin Backlog Autopilot")
 
 
-@st.fragment(run_every=10)
+@st.fragment(run_every=REFRESH_SECONDS)
 def render():
     try:
         health = api_get("/healthz")
