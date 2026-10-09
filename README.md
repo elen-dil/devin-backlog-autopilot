@@ -10,13 +10,14 @@ opens a PR, while a small dashboard tracks throughput, success rates, and cost.
 ```
                  label: devin-remediate
                           │
-GitHub ──webhook──▶ POST /webhooks/github ──┐
- (issues.labeled,        (HMAC-SHA256       │   enqueue (idempotent:
-  signature verified)     + ping)           │   one active run per issue)
-                          │               ▼
-        poll every 60s ─────────────────▶ SQLite `runs`  (the queue;
-        open issues with                  queued | running | pr_open |
-        trigger label                     merged | needs_human | failed)
+        poll every 60s    ▼
+        open issues with  enqueue (idempotent:
+        trigger label     one active run per issue)
+                          │
+                          ▼
+                    SQLite `runs`  (the queue;
+                    queued | running | pr_open |
+                    merged | needs_human | failed)
                                               │
                         dispatcher (MAX_CONCURRENT_SESSIONS=3)
                                               │
@@ -53,9 +54,9 @@ Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs, GET /api/v1/m
   time, so a restart picks up queued, running, and pr_open runs with no
   recovery path.
 - **Idempotency at the DB level.** A partial unique index
-  (`issue_number WHERE state IN ('queued','running')`) makes the webhook and
-  the fallback poller race-safe. Re-labeling after a run closes starts a fresh
-  run.
+  (`issue_number WHERE state IN ('queued','running')`) makes every enqueue
+  path (poller, simulate endpoint) race-safe. Re-labeling after a run closes
+  starts a fresh run.
 - **Session creation dedups on tags.** The sessions API has no idempotency
   keys, so when `POST /sessions` fails ambiguously (5xx or transport error)
   the client first looks for a session carrying the run's `issue-<n>` tag and
@@ -69,9 +70,10 @@ Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs, GET /api/v1/m
 - **Guardrails.** `MAX_ACU_PER_SESSION` caps spend per issue,
   `MAX_CONCURRENT_SESSIONS` caps parallelism, and a session that fails to start
   gets its trigger label removed so the poller can't loop on it.
-- **Webhook + poller.** The webhook is the fast path; a 60s poll of labeled
-  open issues catches anything the webhook missed (or a webhook that was never
-  configured).
+- **Polling, not webhooks.** A 60s poll of open issues carrying the trigger
+  label is the only ingress: it works with no public endpoint, no tunnel, and
+  no inbound attack surface — the right trade for a locally-hosted service.
+  A webhook fast path was removed as unused infrastructure (see git history).
 
 ## Setup
 
@@ -88,15 +90,6 @@ uvicorn app.main:app --port 8000            # API
 FASTAPI_BASE_URL=http://localhost:8000 \
   streamlit run dashboard/app.py            # dashboard
 ```
-
-## GitHub webhook
-
-Create a webhook on the target repo:
-
-- Payload URL: `https://<your-host>/webhooks/github` (locally, forward with
-  [smee.io](https://smee.io): `smee -u https://smee.io/<channel> -t http://localhost:8000/webhooks/github`)
-- Secret: value of `GITHUB_WEBHOOK_SECRET`
-- Events: **Issues**
 
 ## Simulate mode
 
@@ -150,7 +143,6 @@ In non-SIMULATE mode, simulated runs are excluded from metrics and tables
 
 ## API
 
-- `POST /webhooks/github` - GitHub `issues` events (`labeled` -> enqueue), `ping`, HMAC-SHA256 verified
 - `GET /api/v1/runs` - all runs with session/PR links, outcomes, ACUs
 - `GET /api/v1/runs/{id}` - one run; `GET /api/v1/runs/{id}/events` - its event timeline
 - `GET /api/v1/metrics` - counts by state, funnel, PR/merge/resolution rates, latency medians, ACU totals and per-unit metrics, runs at cap

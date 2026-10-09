@@ -19,7 +19,6 @@ class Settings:
     devin_org_id: str
     github_token: str
     github_repo: str
-    github_webhook_secret: str
     trigger_label: str
     running_label: str
     pr_open_label: str
@@ -40,7 +39,6 @@ class Settings:
             devin_org_id=os.environ.get("DEVIN_ORG_ID", ""),
             github_token=os.environ.get("GITHUB_TOKEN", ""),
             github_repo=os.environ.get("GITHUB_REPO", "elen-dil/superset-ali"),
-            github_webhook_secret=os.environ.get("GITHUB_WEBHOOK_SECRET", ""),
             trigger_label=os.environ.get("TRIGGER_LABEL", "devin-remediate"),
             running_label=os.environ.get("RUNNING_LABEL", "devin-running"),
             pr_open_label=os.environ.get("PR_OPEN_LABEL", "devin-pr-open"),
@@ -64,7 +62,6 @@ class Settings:
                 ("DEVIN_API_KEY", self.devin_api_key),
                 ("DEVIN_ORG_ID", self.devin_org_id),
                 ("GITHUB_TOKEN", self.github_token),
-                ("GITHUB_WEBHOOK_SECRET", self.github_webhook_secret),
             )
             if not value
         ]
