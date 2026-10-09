@@ -86,6 +86,9 @@ def _dashboard_theme() -> alt.theme.ThemeConfig:
                 "titleFontWeight": 400,
                 "grid": False,
             },
+            # Vega's default label baseline leaves the first band label a
+            # few px off its bar; "middle" centers every label exactly.
+            "axisY": {"labelBaseline": "middle"},
             "legend": {
                 "labelFontSize": FS_SMALL,
                 "titleFontSize": FS_SMALL,
@@ -991,8 +994,7 @@ def render_cost(metrics, runs):
     # Horizontal bars: run names read left-to-right on the y axis, so they
     # stay legible instead of truncating like rotated x-axis labels. Vega-Lite
     # axis labels can't carry tooltips; hovering a bar shows the full name.
-    # Longest sessions at the top.
-    by_minutes = sorted(timed, key=session_minutes, reverse=True)
+    # sort="-x" puts the longest sessions at the top.
     chart = (
         alt.Chart(df)
         .mark_bar()
@@ -1004,9 +1006,9 @@ def render_cost(metrics, runs):
             ),
             y=alt.Y(
                 "Run:N",
-                sort=[issue_ref(r) for r in by_minutes],
+                sort="-x",
                 title=None,
-                axis=alt.Axis(labelLimit=340, labelOverlap=False),
+                axis=alt.Axis(labelLimit=340),
             ),
             # Sessions that hit the per-session ACU cap use the muted color.
             color=alt.Color(
