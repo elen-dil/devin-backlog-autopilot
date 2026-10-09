@@ -683,14 +683,17 @@ def render_cost(metrics, runs):
             ],
         }
     )
-    x = alt.X(
+    # Horizontal bars: run names read left-to-right on the y axis, so they
+    # stay legible instead of truncating like rotated x-axis labels. Vega-Lite
+    # axis labels can't carry tooltips; hovering a bar shows the full name.
+    y = alt.Y(
         "Run:N",
-        sort=alt.EncodingSortField(field="order", order="ascending"),
-        title="Run",
-        axis=alt.Axis(labelAngle=-45),
+        sort=[issue_ref(r) for r in reversed(billable)],
+        title=None,
+        axis=alt.Axis(labelLimit=340, labelOverlap=False),
     )
     base = alt.Chart(df).mark_bar().encode(
-        x=x, y=alt.Y("ACUs:Q"), tooltip=["Run", "ACUs"]
+        x=alt.X("ACUs:Q"), y=y, tooltip=["Run", "ACUs"]
     )
     layers = [base]
     if cap is not None:
@@ -698,14 +701,17 @@ def render_cost(metrics, runs):
             alt.Chart(df)
             .mark_bar(color="orange")
             .transform_filter(alt.datum.at_cap == True)  # noqa: E712
-            .encode(x=x, y=alt.Y("ACUs:Q"), tooltip=["Run", "ACUs"])
+            .encode(x=alt.X("ACUs:Q"), y=y, tooltip=["Run", "ACUs"])
         )
         layers.append(
             alt.Chart(pd.DataFrame({"cap": [cap]}))
             .mark_rule(strokeDash=[6, 4])
-            .encode(y="cap:Q")
+            .encode(x="cap:Q")
         )
-    st.altair_chart(alt.layer(*layers), width="stretch")
+    st.altair_chart(
+        alt.layer(*layers).properties(height=max(160, 26 * len(billable))),
+        width="stretch",
+    )
     if cap is not None:
         if runs_at_cap:
             st.caption(
@@ -746,15 +752,21 @@ def render():
 
     render_banner(health, metrics)
     render_kpis(metrics, runs)
+    # on_change="rerun" makes tabs dynamic: only the open tab renders, so
+    # charts never mount inside a hidden (zero-width) container and stay
+    # correctly sized when switching.
     tab_overview, tab_trends, tab_cost = st.tabs(
-        ["Overview", "Trends", "Cost"]
+        ["Overview", "Trends", "Cost"], on_change="rerun"
     )
-    with tab_overview:
-        render_overview(metrics, runs)
-    with tab_trends:
-        render_trends(metrics, runs)
-    with tab_cost:
-        render_cost(metrics, runs)
+    if tab_overview.open:
+        with tab_overview:
+            render_overview(metrics, runs)
+    if tab_trends.open:
+        with tab_trends:
+            render_trends(metrics, runs)
+    if tab_cost.open:
+        with tab_cost:
+            render_cost(metrics, runs)
 
 
 render()
