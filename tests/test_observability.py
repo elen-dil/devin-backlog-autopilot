@@ -179,7 +179,6 @@ def test_queued_event_records_webhook_source(settings, components):
 
 def test_metrics_hand_computed(settings, components):
     store, devin, _ = components
-    settings.acu_price_usd = 1.5
 
     # finished_at - started_at -> latency; created_at - finished_at -> label
     # to result. Cap is settings.max_acu_per_session = 10.
@@ -199,7 +198,6 @@ def test_metrics_hand_computed(settings, components):
         "simulate",
         "repo",
         "max_acu_per_session",
-        "acu_price_usd",
         "funnel",
         "issues_completed",
         "pr_rate",
@@ -225,7 +223,6 @@ def test_metrics_hand_computed(settings, components):
     assert m["simulate"] is True
     assert m["repo"] == settings.github_repo
     assert m["max_acu_per_session"] == 10
-    assert m["acu_price_usd"] == 1.5
     assert m["funnel"] == {
         "labeled": 5,
         "sessions_started": 4,

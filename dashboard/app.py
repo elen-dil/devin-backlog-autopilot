@@ -42,13 +42,16 @@ OUTCOME_LABELS = {
     "not_reproducible": "Not reproducible",
 }
 
-ACTIVE_STATES = {"queued", "running"}
 TERMINAL_STATES = {"merged", "needs_human", "failed"}
 
 ACU_HELP = (
     "ACU = Agent Compute Unit: Devin's unit of compute billing. "
     "Each session is capped at MAX_ACU_PER_SESSION."
 )
+
+# Dataframe row height is ~35px; header counts as one row.
+TABLE_ROW_HEIGHT = 35
+TABLE_MAX_ROWS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -311,337 +314,152 @@ def render_banner(health, metrics):
     repo = metrics.get("repo") or "unknown repo"
     refreshed = datetime.now(DISPLAY_TZ).strftime(TS_FORMAT)
     if health.get("simulate"):
-        st.warning(
-            f"**SIMULATE MODE (fake data)** — {repo} — last refreshed {refreshed}"
+        st.caption(
+            f":orange[**SIMULATE MODE** (fake data)] · {repo} · "
+            f"refreshed {refreshed}"
         )
     else:
-        st.success(f"**LIVE** — {repo} — last refreshed {refreshed}")
+        st.caption(f":green[**LIVE**] · {repo} · refreshed {refreshed}")
 
 
-def render_status(metrics, runs):
-    st.header("Status")
-    st.caption("What is happening right now?")
-
+def render_kpis(metrics, runs):
+    """One always-visible row of grouped KPI tiles."""
     counts = by_state_counts(metrics, runs)
-    cols = st.columns(len(STATE_ORDER))
-    for col, state in zip(cols, STATE_ORDER):
-        col.metric(
-            STATE_LABELS[state],
-            counts[state],
-            help=f"Number of runs currently in the '{STATE_LABELS[state]}' state.",
+    status_col, eff_col, thr_col, cost_col = st.columns([4, 4, 3, 4])
+
+    with status_col:
+        st.caption("**Status**")
+        st.metric(
+            "Active",
+            f"{counts['running']} running · {counts['queued']} queued",
+            help="Runs with a live Devin session, plus labeled issues waiting "
+            "for a free session slot (MAX_CONCURRENT_SESSIONS).",
         )
 
-    st.subheader("Active now")
-    active = [r for r in runs if r.get("state") in ACTIVE_STATES]
-    if not active:
-        st.caption("Nothing queued or running right now.")
+    with eff_col:
+        st.caption("**Effectiveness**")
+        res_col, merge_col = st.columns(2)
+        res_col.metric(
+            "Resolution rate",
+            fmt_pct(metrics.get("resolution_rate")),
+            help="Share of finished runs that ended in a merged fix. "
+            "Formula: merged runs ÷ finished runs.",
+        )
+        merge_col.metric(
+            "Merge rate",
+            fmt_pct(metrics.get("merge_rate")),
+            help="Share of opened PRs that were merged. "
+            "Formula: merged ÷ PRs opened.",
+        )
+
+    with thr_col:
+        st.caption("**Throughput**")
+        st.metric(
+            "Median time to PR",
+            fmt_minutes(metrics.get("median_label_to_pr_minutes")),
+            help="Median minutes from an issue being labeled to its PR "
+            "opening. Formula: median(PR opened time − labeled time).",
+        )
+
+    with cost_col:
+        st.caption("**Cost**")
+        total_col, per_fix_col = st.columns(2)
+        total_col.metric(
+            "Total ACUs",
+            f"{(metrics.get('total_acus') or 0):.1f}",
+            help=f"Sum of ACUs consumed across all runs. {ACU_HELP}",
+        )
+        per_fix_col.metric(
+            "ACUs per merged fix",
+            fmt_number(metrics.get("acus_per_merged_fix")),
+            help="Total ACUs ÷ merged fixes. Includes compute spent on runs "
+            f"that did not merge. {ACU_HELP}",
+        )
+
+
+def render_funnel(metrics, runs):
+    funnel = funnel_counts(metrics, runs)
+    if all(count == 0 for _, count in funnel):
+        st.caption("No issues have entered the pipeline yet.")
         return
+    df = pd.DataFrame(
+        {
+            "Stage": [s for s, _ in funnel],
+            "Count": [c for _, c in funnel],
+            "order": range(len(funnel)),
+        }
+    )
+    chart = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Count:Q", title="Issues"),
+            y=alt.Y(
+                "Stage:N",
+                sort=alt.EncodingSortField(field="order", order="ascending"),
+                title=None,
+            ),
+            tooltip=["Stage", "Count"],
+        )
+        .properties(height=180)
+    )
+    st.altair_chart(chart, width="stretch")
+
+
+def render_needs_human(runs):
+    blocked = [r for r in runs if r.get("state") == "needs_human"]
+    if not blocked:
+        st.caption("No runs are waiting on a human.")
+        return
+    for r in blocked:
+        report = parse_output(r) or {}
+        blocker = (
+            report.get("blockers")
+            or r.get("error")
+            or "No blocker detail recorded."
+        )
+        url = r.get("issue_url")
+        ref = f"[{issue_ref(r)}]({url})" if url else issue_ref(r)
+        st.markdown(f"- {ref} — {blocker}")
+
+
+def render_runs_table(runs):
+    if not runs:
+        st.caption("No runs yet — waiting for issues labeled `devin-remediate`.")
+        return
+
+    ordered = sorted(
+        runs,
+        key=lambda r: parse_ts(r.get("created_at"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
     now = datetime.now(DISPLAY_TZ).isoformat()
     df = pd.DataFrame(
         [
             {
                 "Issue": issue_ref(r),
                 "Status": state_label(r.get("state")),
-                "Elapsed": fmt_delta(r.get("created_at"), now),
-                "Session": r.get("session_url"),
-            }
-            for r in active
-        ]
-    )
-    df["Session"] = df["Session"].where(df["Session"].notna(), None)
-    st.dataframe(
-        df,
-        column_config={
-            "Session": st.column_config.LinkColumn("Session", display_text="Open")
-        },
-        hide_index=True,
-        width="stretch",
-    )
-
-
-def render_effectiveness(metrics, runs):
-    st.header("Effectiveness")
-    st.caption("Is Devin's work good?")
-
-    cols = st.columns(3)
-    cols[0].metric(
-        "Resolution rate",
-        fmt_pct(metrics.get("resolution_rate")),
-        help="Share of finished runs that ended in a merged fix. "
-        "Formula: merged runs ÷ finished runs.",
-    )
-    cols[1].metric(
-        "Merge rate",
-        fmt_pct(metrics.get("merge_rate")),
-        help="Share of opened PRs that were merged. "
-        "Formula: merged ÷ PRs opened.",
-    )
-    cols[2].metric(
-        "PR rate",
-        fmt_pct(metrics.get("pr_rate")),
-        help="Share of finished runs that produced a pull request. "
-        "Formula: PRs opened ÷ finished runs.",
-    )
-
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("Pipeline funnel")
-        funnel = funnel_counts(metrics, runs)
-        if all(count == 0 for _, count in funnel):
-            st.caption("No issues have entered the pipeline yet.")
-        else:
-            df = pd.DataFrame(
-                {
-                    "Stage": [s for s, _ in funnel],
-                    "Count": [c for _, c in funnel],
-                    "order": range(len(funnel)),
-                }
-            )
-            chart = (
-                alt.Chart(df)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Count:Q", title="Issues"),
-                    y=alt.Y(
-                        "Stage:N",
-                        sort=alt.EncodingSortField(field="order", order="ascending"),
-                        title=None,
-                    ),
-                    tooltip=["Stage", "Count"],
-                )
-            )
-            st.altair_chart(chart, width="stretch")
-
-    with right:
-        st.subheader("Outcome breakdown")
-        finished = [r for r in runs if is_finished(r)]
-        if not finished:
-            st.caption("No finished runs yet.")
-        else:
-            outcome_counts = {}
-            for r in finished:
-                label = outcome_label(r.get("outcome"))
-                outcome_counts[label] = outcome_counts.get(label, 0) + 1
-            df = pd.DataFrame(
-                [
-                    {"Outcome": k, "Runs": v}
-                    for k, v in sorted(
-                        outcome_counts.items(), key=lambda kv: kv[1], reverse=True
-                    )
-                ]
-            )
-            chart = (
-                alt.Chart(df)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Runs:Q", title="Runs"),
-                    y=alt.Y("Outcome:N", sort="-x", title=None),
-                    tooltip=["Outcome", "Runs"],
-                )
-            )
-            st.altair_chart(chart, width="stretch")
-
-    st.subheader("Blocked — needs a human")
-    blocked = [r for r in runs if r.get("state") == "needs_human"]
-    if not blocked:
-        st.caption("No runs are waiting on a human.")
-    else:
-        for r in blocked:
-            report = parse_output(r) or {}
-            blocker = report.get("blockers") or r.get("error") or "No blocker detail recorded."
-            url = r.get("issue_url")
-            ref = f"[{issue_ref(r)}]({url})" if url else issue_ref(r)
-            st.markdown(f"- {ref} — {blocker}")
-
-
-def render_throughput(metrics, runs):
-    st.header("Throughput")
-    st.caption("How fast is the backlog moving?")
-
-    issues_completed = metrics.get("issues_completed")
-    if issues_completed is None:
-        issues_completed = sum(1 for r in runs if is_finished(r))
-
-    cols = st.columns(3)
-    cols[0].metric(
-        "Issues completed",
-        issues_completed,
-        help="Issues whose run reached a final result (merged, needs human, or failed).",
-    )
-    cols[1].metric(
-        "Median time to result",
-        fmt_minutes(metrics.get("median_label_to_result_minutes")),
-        help="Median minutes from an issue being labeled to its run finishing. "
-        "Formula: median(finish time − labeled time).",
-    )
-    cols[2].metric(
-        "Median time to PR",
-        fmt_minutes(metrics.get("median_label_to_pr_minutes")),
-        help="Median minutes from an issue being labeled to its PR opening. "
-        "Formula: median(PR opened time − labeled time).",
-    )
-
-    st.subheader("Completed over time")
-    finished = sorted(
-        (r for r in runs if parse_ts(r.get("finished_at"))),
-        key=lambda r: parse_ts(r["finished_at"]),
-    )
-    if not finished:
-        st.caption("No runs have finished yet.")
-        return
-    df = pd.DataFrame(
-        {
-            "Finished": pd.to_datetime(
-                [r["finished_at"] for r in finished], utc=True
-            ),
-            "Completed": range(1, len(finished) + 1),
-        }
-    )
-    # Wall-clock times in DISPLAY_TZ; dropping tzinfo keeps the axis labels in
-    # the business timezone regardless of the viewer's browser timezone.
-    df["Finished"] = (
-        df["Finished"].dt.tz_convert(DISPLAY_TZ).dt.tz_localize(None)
-    )
-    span = df["Finished"].max() - df["Finished"].min()
-    time_format = "%H:%M" if span < pd.Timedelta(hours=24) else "%b %d %H:%M"
-    chart = (
-        alt.Chart(df)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(
-                "Finished:T",
-                title=f"Finished at ({DISPLAY_TZ_NAME})",
-                axis=alt.Axis(format=time_format),
-            ),
-            y=alt.Y("Completed:Q", title="Runs completed"),
-            tooltip=[
-                alt.Tooltip(
-                    "Finished:T",
-                    title="Finished at",
-                    format="%b %d %H:%M:%S",
+                # For unfinished runs this column shows elapsed time instead.
+                "Time to result": fmt_delta(
+                    r.get("created_at"), r.get("finished_at") or now
                 ),
-                alt.Tooltip("Completed:Q", title="Runs completed"),
-            ],
-        )
-    )
-    st.altair_chart(chart, width="stretch")
-
-
-def render_cost(metrics, runs):
-    st.header("Cost")
-    st.caption("What is this costing?")
-
-    total_acus = metrics.get("total_acus") or 0
-    price = metrics.get("acu_price_usd")
-    cap = metrics.get("max_acu_per_session")
-    runs_at_cap = metrics.get("runs_at_cap")
-    if runs_at_cap is None and cap is not None:
-        runs_at_cap = sum(
-            1 for r in runs if r.get("acus") is not None and r["acus"] >= cap
-        )
-
-    cols = st.columns(5)
-    cols[0].metric(
-        "Total ACUs",
-        f"{total_acus:.1f}",
-        help=f"Sum of ACUs consumed across all runs. {ACU_HELP}",
-    )
-    cols[1].metric(
-        "Estimated cost",
-        f"${total_acus * price:,.2f}" if price is not None else "set ACU_PRICE_USD",
-        help=f"Total ACUs × ACU_PRICE_USD. {ACU_HELP}",
-    )
-    cols[2].metric(
-        "ACUs per run",
-        fmt_number(metrics.get("acus_per_run")),
-        help=f"Total ACUs ÷ finished runs. {ACU_HELP}",
-    )
-    cols[3].metric(
-        "ACUs per PR opened",
-        fmt_number(metrics.get("acus_per_pr")),
-        help=f"Total ACUs ÷ PRs opened. {ACU_HELP}",
-    )
-    cols[4].metric(
-        "ACUs per merged fix",
-        fmt_number(metrics.get("acus_per_merged_fix")),
-        help=f"Total ACUs ÷ merged fixes. Includes compute spent on runs "
-        f"that did not merge. {ACU_HELP}",
-    )
-
-    st.subheader("ACUs per run")
-    billable = [r for r in runs if r.get("acus") is not None]
-    if not billable:
-        st.caption("No ACU usage recorded yet.")
-        return
-    df = pd.DataFrame(
-        {
-            "Run": [issue_ref(r) for r in billable],
-            "ACUs": [r["acus"] for r in billable],
-            "order": range(len(billable)),
-            "at_cap": [
-                bool(cap is not None and r["acus"] >= cap) for r in billable
-            ],
-        }
-    )
-    x = alt.X(
-        "Run:N",
-        sort=alt.EncodingSortField(field="order", order="ascending"),
-        title="Run",
-        axis=alt.Axis(labelAngle=-45),
-    )
-    base = alt.Chart(df).mark_bar().encode(
-        x=x, y=alt.Y("ACUs:Q"), tooltip=["Run", "ACUs"]
-    )
-    layers = [base]
-    if cap is not None:
-        layers.append(
-            alt.Chart(df)
-            .mark_bar(color="orange")
-            .transform_filter(alt.datum.at_cap == True)  # noqa: E712
-            .encode(x=x, y=alt.Y("ACUs:Q"), tooltip=["Run", "ACUs"])
-        )
-        layers.append(
-            alt.Chart(pd.DataFrame({"cap": [cap]}))
-            .mark_rule(strokeDash=[6, 4])
-            .encode(y="cap:Q")
-        )
-    st.altair_chart(alt.layer(*layers), width="stretch")
-    if cap is not None:
-        if runs_at_cap:
-            st.caption(
-                f"{runs_at_cap} run(s) hit the MAX_ACU_PER_SESSION cap "
-                f"({cap}) — highlighted in orange."
-            )
-        else:
-            st.caption(f"No runs have hit the MAX_ACU_PER_SESSION cap ({cap}).")
-
-
-def render_runs(runs):
-    st.header("Runs")
-    if not runs:
-        st.caption("No runs yet — waiting for issues labeled `devin-remediate`.")
-        return
-
-    df = pd.DataFrame(
-        [
-            {
-                "Issue": issue_ref(r),
-                "Status": state_label(r.get("state")),
-                "Outcome": outcome_label(r.get("outcome")),
-                "Finished": fmt_ts(r.get("finished_at")),
-                "Time to result": fmt_delta(r.get("created_at"), r.get("finished_at")),
-                "ACUs used": "—" if r.get("acus") is None else f"{r['acus']:.1f}",
-                "Tests": tests_text(r),
+                "ACUs": "—" if r.get("acus") is None else f"{r['acus']:.1f}",
                 "Session": r.get("session_url"),
                 "PR": r.get("pr_url"),
+                "Details": "View",
             }
-            for r in runs
+            for r in ordered
         ]
     )
-    # LinkColumn renders NaN literally; normalize missing URLs to None.
+    # LinkColumn renders NaN/None literally; use empty string for no link.
     for col in ("Session", "PR"):
-        df[col] = df[col].where(df[col].notna(), None)
+        df[col] = df[col].where(df[col].notna(), "")
+    # Cap the table at ~8 rows so the Overview tab fits one laptop screen.
+    height = min(
+        TABLE_ROW_HEIGHT * (TABLE_MAX_ROWS + 1),
+        TABLE_ROW_HEIGHT * (len(df) + 1) + 4,
+    )
     event = st.dataframe(
         df,
         on_select="rerun",
@@ -649,21 +467,35 @@ def render_runs(runs):
         column_config={
             "Session": st.column_config.LinkColumn("Session", display_text="Open"),
             "PR": st.column_config.LinkColumn("PR", display_text="Open"),
+            "Details": st.column_config.ButtonColumn(
+                "Details", key="run_detail_click", width="small"
+            ),
         },
+        height=height,
         hide_index=True,
         width="stretch",
     )
 
-    selected = event.selection.rows
-    if not selected:
-        st.caption("Select a row to inspect a run.")
+    # ButtonColumn clicks are transient (set only during the click rerun), so
+    # the 10s fragment refresh never reopens a dismissed dialog.
+    click = st.session_state.get("run_detail_click")
+    if click is not None:
+        run_detail_dialog(ordered[click["row"]])
         return
-    render_run_detail(runs[selected[0]])
+
+    # Row selection also opens the dialog, but only when the selection
+    # changes; a persisted selection would otherwise reopen it every tick.
+    selected = event.selection.rows
+    if selected == st.session_state.get("_selected_row"):
+        return
+    st.session_state["_selected_row"] = selected
+    if selected:
+        run_detail_dialog(ordered[selected[0]])
 
 
-def render_run_detail(run):
-    st.divider()
-    st.subheader(issue_ref(run))
+@st.dialog("Run details", width="large")
+def run_detail_dialog(run):
+    st.markdown(f"##### {issue_ref(run)}")
 
     links = []
     if run.get("issue_url"):
@@ -727,11 +559,166 @@ def render_run_detail(run):
         st.dataframe(raw, hide_index=True, width="stretch")
 
 
+def render_overview(metrics, runs):
+    table_col, side_col = st.columns([7, 4])
+    with table_col:
+        render_runs_table(runs)
+    with side_col:
+        st.markdown("##### Pipeline")
+        render_funnel(metrics, runs)
+        st.markdown("##### Needs human")
+        render_needs_human(runs)
+
+
+def render_trends(metrics, runs):
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown("##### Completed over time")
+        finished = sorted(
+            (r for r in runs if parse_ts(r.get("finished_at"))),
+            key=lambda r: parse_ts(r["finished_at"]),
+        )
+        if not finished:
+            st.caption("No runs have finished yet.")
+        else:
+            df = pd.DataFrame(
+                {
+                    "Finished": pd.to_datetime(
+                        [r["finished_at"] for r in finished], utc=True
+                    ),
+                    "Completed": range(1, len(finished) + 1),
+                }
+            )
+            # Wall-clock times in DISPLAY_TZ; dropping tzinfo keeps the axis
+            # labels in the business timezone regardless of the viewer's
+            # browser timezone.
+            df["Finished"] = (
+                df["Finished"].dt.tz_convert(DISPLAY_TZ).dt.tz_localize(None)
+            )
+            span = df["Finished"].max() - df["Finished"].min()
+            time_format = (
+                "%H:%M" if span < pd.Timedelta(hours=24) else "%b %d %H:%M"
+            )
+            chart = (
+                alt.Chart(df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X(
+                        "Finished:T",
+                        title=f"Finished at ({DISPLAY_TZ_NAME})",
+                        axis=alt.Axis(format=time_format),
+                    ),
+                    y=alt.Y("Completed:Q", title="Runs completed"),
+                    tooltip=[
+                        alt.Tooltip(
+                            "Finished:T",
+                            title="Finished at",
+                            format="%b %d %H:%M:%S",
+                        ),
+                        alt.Tooltip("Completed:Q", title="Runs completed"),
+                    ],
+                )
+            )
+            st.altair_chart(chart, width="stretch")
+
+    with right:
+        st.markdown("##### Outcome breakdown")
+        finished = [r for r in runs if is_finished(r)]
+        if not finished:
+            st.caption("No finished runs yet.")
+        else:
+            outcome_counts = {}
+            for r in finished:
+                label = outcome_label(r.get("outcome"))
+                outcome_counts[label] = outcome_counts.get(label, 0) + 1
+            df = pd.DataFrame(
+                [
+                    {"Outcome": k, "Runs": v}
+                    for k, v in sorted(
+                        outcome_counts.items(), key=lambda kv: kv[1], reverse=True
+                    )
+                ]
+            )
+            chart = (
+                alt.Chart(df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Runs:Q", title="Runs"),
+                    y=alt.Y("Outcome:N", sort="-x", title=None),
+                    tooltip=["Outcome", "Runs"],
+                )
+            )
+            st.altair_chart(chart, width="stretch")
+
+
+def render_cost(metrics, runs):
+    st.markdown("##### ACUs per run")
+    cap = metrics.get("max_acu_per_session")
+    runs_at_cap = metrics.get("runs_at_cap")
+    if runs_at_cap is None and cap is not None:
+        runs_at_cap = sum(
+            1 for r in runs if r.get("acus") is not None and r["acus"] >= cap
+        )
+
+    billable = [r for r in runs if r.get("acus") is not None]
+    if not billable:
+        st.caption("No ACU usage recorded yet.")
+        return
+    df = pd.DataFrame(
+        {
+            "Run": [issue_ref(r) for r in billable],
+            "ACUs": [r["acus"] for r in billable],
+            "order": range(len(billable)),
+            "at_cap": [
+                bool(cap is not None and r["acus"] >= cap) for r in billable
+            ],
+        }
+    )
+    x = alt.X(
+        "Run:N",
+        sort=alt.EncodingSortField(field="order", order="ascending"),
+        title="Run",
+        axis=alt.Axis(labelAngle=-45),
+    )
+    base = alt.Chart(df).mark_bar().encode(
+        x=x, y=alt.Y("ACUs:Q"), tooltip=["Run", "ACUs"]
+    )
+    layers = [base]
+    if cap is not None:
+        layers.append(
+            alt.Chart(df)
+            .mark_bar(color="orange")
+            .transform_filter(alt.datum.at_cap == True)  # noqa: E712
+            .encode(x=x, y=alt.Y("ACUs:Q"), tooltip=["Run", "ACUs"])
+        )
+        layers.append(
+            alt.Chart(pd.DataFrame({"cap": [cap]}))
+            .mark_rule(strokeDash=[6, 4])
+            .encode(y="cap:Q")
+        )
+    st.altair_chart(alt.layer(*layers), width="stretch")
+    if cap is not None:
+        if runs_at_cap:
+            st.caption(
+                f"{runs_at_cap} run(s) hit the MAX_ACU_PER_SESSION cap "
+                f"({cap}) — highlighted in orange."
+            )
+        else:
+            st.caption(f"No runs have hit the MAX_ACU_PER_SESSION cap ({cap}).")
+
+
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="Devin Backlog Autopilot", layout="wide")
+# Tighten Streamlit's default page padding so the KPI row plus the Overview
+# tab fit a ~1440x900 laptop screen without scrolling.
+st.markdown(
+    "<style>.block-container{padding-top:1.75rem;padding-bottom:1rem;}</style>",
+    unsafe_allow_html=True,
+)
 st.title("Devin Backlog Autopilot")
 
 
@@ -749,11 +736,16 @@ def render():
         return
 
     render_banner(health, metrics)
-    render_status(metrics, runs)
-    render_effectiveness(metrics, runs)
-    render_throughput(metrics, runs)
-    render_cost(metrics, runs)
-    render_runs(runs)
+    render_kpis(metrics, runs)
+    tab_overview, tab_trends, tab_cost = st.tabs(
+        ["Overview", "Trends", "Cost"]
+    )
+    with tab_overview:
+        render_overview(metrics, runs)
+    with tab_trends:
+        render_trends(metrics, runs)
+    with tab_cost:
+        render_cost(metrics, runs)
 
 
 render()

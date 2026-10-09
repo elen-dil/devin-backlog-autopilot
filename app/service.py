@@ -416,7 +416,6 @@ def compute_metrics(runs, settings) -> dict:
         "simulate": settings.simulate,
         "repo": settings.github_repo,
         "max_acu_per_session": settings.max_acu_per_session,
-        "acu_price_usd": settings.acu_price_usd,
         # Funnel counts distinct issues at every stage: an issue remediated
         # twice still counts once, keeping the funnel monotonic. Retries
         # still show up in ACU totals.
