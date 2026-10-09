@@ -115,11 +115,42 @@ curl -X POST localhost:8000/simulate/issue \
   -d '{"number": 2, "title": "ambiguous", "outcome": "needs_human"}'
 ```
 
+## Dashboard
+
+Streamlit app on :8501, reads only from the FastAPI API (never SQLite directly),
+auto-refreshes every 10s. A banner shows LIVE vs SIMULATE MODE plus the repo and
+last-refresh time. Four sections:
+
+- **STATUS** — what is happening now. Count of runs per state, and an "Active
+  now" table of queued/running work with live session links.
+- **EFFECTIVENESS** — is Devin's work good.
+  - *Resolution rate* = merged / finished runs (pr_open + merged + needs_human + failed).
+  - *Merge rate* = merged / PRs opened.
+  - *PR rate* = PRs opened / finished runs.
+  - Pipeline funnel (labeled -> sessions started -> PRs opened -> merged),
+    outcome breakdown, and a list of blockers from needs_human runs.
+- **THROUGHPUT** — how fast the backlog moves: issues completed, median time
+  from label to result, median time from label to PR, and a cumulative
+  completed-over-time chart.
+- **COST** — total ACUs, estimated cost (`ACU_PRICE_USD` env; unset shows a
+  reminder, no price is hardcoded), ACUs per run / per PR / per merged fix, and
+  a per-run ACU bar chart with the `MAX_ACU_PER_SESSION` cap as a reference
+  line and at-cap runs highlighted.
+
+Selecting a row in the Runs table opens a detail panel: issue/session/PR links,
+the session's full structured report, and an event timeline (`run_events`)
+covering queue source, session creation, status changes, every GitHub
+write-back, and finalization.
+
+In non-SIMULATE mode, simulated runs are excluded from metrics and tables
+(`is_simulated` flag, set at enqueue time).
+
 ## API
 
 - `POST /webhooks/github` - GitHub `issues` events (`labeled` -> enqueue), `ping`, HMAC-SHA256 verified
 - `GET /api/v1/runs` - all runs with session/PR links, outcomes, ACUs
-- `GET /api/v1/metrics` - counts by state, PR rate, merge rate (merged / PRs opened), resolution rate (merged / finished runs), median start-to-finish latency, total ACUs, ACUs per merged fix
+- `GET /api/v1/runs/{id}` - one run; `GET /api/v1/runs/{id}/events` - its event timeline
+- `GET /api/v1/metrics` - counts by state, funnel, PR/merge/resolution rates, latency medians, ACU totals and per-unit costs, runs at cap
 - `POST /simulate/issue` - inject an issue (SIMULATE only)
 - `GET /healthz`
 

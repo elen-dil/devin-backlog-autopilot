@@ -54,13 +54,46 @@ class AutopilotService:
         self._devin = devin
         self._github = github
 
-    async def enqueue_issue(self, number: int, title: str, url: str, body: str) -> str:
-        run_id = self._store.enqueue(number, title, url, body or "")
+    async def enqueue_issue(
+        self, number: int, title: str, url: str, body: str, source: str
+    ) -> str:
+        run_id = self._store.enqueue(
+            number, title, url, body or "", is_simulated=self._s.simulate
+        )
         if run_id is None:
             logger.info("issue #%s already has an active run; skipping", number)
             return "already_active"
-        logger.info("queued issue #%s (run %s)", number, run_id)
+        self._store.add_event(run_id, "queued", f"source={source}")
+        logger.info("queued issue #%s (run %s) via %s", number, run_id, source)
         return "queued"
+
+    async def _gh_write(self, run_id: int, op: str, call, *args) -> None:
+        """GitHub write-back with a `github_write` event; failures re-raise.
+
+        Callers keep their existing error handling (e.g. a failed label
+        removal aborts finalize so the run stays active for a retry).
+        """
+        try:
+            await call(*args)
+        except Exception as exc:
+            self._store.add_event(run_id, "github_write", f"{op}: failed ({exc})")
+            raise
+        self._store.add_event(run_id, "github_write", f"{op}: ok")
+
+    def _record_status_change(self, run_id: int, status, status_detail) -> None:
+        """Record a status_change event when the observed (status, detail)
+        pair differs from the last one recorded; the first observation counts."""
+        observed = f"status={status} detail={status_detail}"
+        last = next(
+            (
+                e["detail"]
+                for e in reversed(self._store.events_for(run_id))
+                if e["event"] == "status_change"
+            ),
+            None,
+        )
+        if observed != last:
+            self._store.add_event(run_id, "status_change", observed)
 
     async def issue_poll_tick(self) -> None:
         """Fallback trigger: adopt open issues carrying the trigger label."""
@@ -71,6 +104,7 @@ class AutopilotService:
                 issue["title"],
                 issue["html_url"],
                 issue.get("body") or "",
+                source="poller",
             )
 
     async def dispatch_tick(self) -> None:
@@ -111,8 +145,18 @@ class AutopilotService:
             self._store.update(
                 run["id"], state="failed", error=str(exc), finished_at=_now()
             )
-            await self._github.remove_label(issue_number, self._s.trigger_label)
-            await self._github.comment(
+            self._store.add_event(run["id"], "error", str(exc))
+            await self._gh_write(
+                run["id"],
+                f"remove_label {self._s.trigger_label}",
+                self._github.remove_label,
+                issue_number,
+                self._s.trigger_label,
+            )
+            await self._gh_write(
+                run["id"],
+                "comment",
+                self._github.comment,
                 issue_number,
                 f"Autopilot could not start a Devin session: `{exc}`",
             )
@@ -123,8 +167,22 @@ class AutopilotService:
             session_id=session["session_id"],
             session_url=session.get("url"),
         )
-        await self._github.add_label(issue_number, self._s.running_label)
-        await self._github.comment(
+        self._store.add_event(
+            run["id"],
+            "session_created",
+            f"session_id={session['session_id']} url={session.get('url')}",
+        )
+        await self._gh_write(
+            run["id"],
+            f"add_label {self._s.running_label}",
+            self._github.add_label,
+            issue_number,
+            self._s.running_label,
+        )
+        await self._gh_write(
+            run["id"],
+            "comment",
+            self._github.comment,
             issue_number,
             f"Devin session started: {session.get('url')}\n"
             f"ACU cap: {self._s.max_acu_per_session}",
@@ -137,14 +195,20 @@ class AutopilotService:
                 # Claimed but session create never landed (e.g. process killed
                 # mid-dispatch). Fail stale claims so they can't wedge a slot.
                 if _older_than(run["started_at"], seconds=300):
+                    error = "session creation interrupted"
                     self._store.update(
                         run["id"],
                         state="failed",
-                        error="session creation interrupted",
+                        error=error,
                         finished_at=_now(),
                     )
-                    await self._github.remove_label(
-                        run["issue_number"], self._s.trigger_label
+                    self._store.add_event(run["id"], "error", error)
+                    await self._gh_write(
+                        run["id"],
+                        f"remove_label {self._s.trigger_label}",
+                        self._github.remove_label,
+                        run["issue_number"],
+                        self._s.trigger_label,
                     )
                 continue
             try:
@@ -153,6 +217,9 @@ class AutopilotService:
                 # A failed poll is transient; the next tick retries.
                 logger.exception("poll failed for session %s", run["session_id"])
                 continue
+            self._record_status_change(
+                run["id"], session.get("status"), session.get("status_detail")
+            )
             if session_is_terminal(session.get("status"), session.get("status_detail")):
                 try:
                     await self._finalize(run, session)
@@ -202,14 +269,27 @@ class AutopilotService:
         # run leaves an active state the issue poller may adopt it again, so
         # the trigger label must be gone first. Removal is idempotent
         # (404-tolerant), so a retry after a mid-finalize crash is safe.
-        await self._github.remove_label(issue_number, self._s.trigger_label)
-        await self._github.remove_label(issue_number, self._s.running_label)
+        await self._gh_write(
+            run["id"],
+            f"remove_label {self._s.trigger_label}",
+            self._github.remove_label,
+            issue_number,
+            self._s.trigger_label,
+        )
+        await self._gh_write(
+            run["id"],
+            f"remove_label {self._s.running_label}",
+            self._github.remove_label,
+            issue_number,
+            self._s.running_label,
+        )
 
+        stored_outcome = outcome or ("failed" if state == "failed" else None)
         self._store.update(
             run["id"],
             state=state,
             pr_url=pr_url,
-            outcome=outcome or ("failed" if state == "failed" else None),
+            outcome=stored_outcome,
             summary=output.get("summary"),
             tests_run=output.get("tests_run"),
             tests_passed=output.get("tests_passed"),
@@ -218,10 +298,28 @@ class AutopilotService:
             error=None if state != "failed" else f"status={status} detail={detail}",
             finished_at=_now(),
         )
+        if state == "failed":
+            self._store.add_event(
+                run["id"], "error", f"status={status} detail={detail}"
+            )
+        # Recorded before the remaining write-backs: if one of them fails the
+        # run is still finalized, and the event log should say so.
+        self._store.add_event(
+            run["id"], "finalized", f"outcome={stored_outcome} state={state}"
+        )
 
         if label:
-            await self._github.add_label(issue_number, label)
-        await self._github.comment(
+            await self._gh_write(
+                run["id"],
+                f"add_label {label}",
+                self._github.add_label,
+                issue_number,
+                label,
+            )
+        await self._gh_write(
+            run["id"],
+            "comment",
+            self._github.comment,
             issue_number,
             _finish_comment(
                 outcome=outcome or state,
@@ -264,7 +362,18 @@ def _finish_comment(**f) -> str:
     return "\n".join(lines)
 
 
-def compute_metrics(runs) -> dict:
+def _minutes_between(runs, start_key: str, end_key: str):
+    return [
+        (
+            datetime.fromisoformat(r[end_key]) - datetime.fromisoformat(r[start_key])
+        ).total_seconds()
+        / 60
+        for r in runs
+        if r[start_key] and r[end_key]
+    ]
+
+
+def compute_metrics(runs, settings) -> dict:
     by_state = {}
     for run in runs:
         by_state[run["state"]] = by_state.get(run["state"], 0) + 1
@@ -272,31 +381,60 @@ def compute_metrics(runs) -> dict:
     total = len(runs)
     merged = by_state.get("merged", 0)
     pr_opened = merged + by_state.get("pr_open", 0)
+    finished = (
+        merged
+        + by_state.get("pr_open", 0)
+        + by_state.get("needs_human", 0)
+        + by_state.get("failed", 0)
+    )
 
-    latencies = [
-        (datetime.fromisoformat(r["finished_at"]) - datetime.fromisoformat(r["started_at"]))
-        .total_seconds() / 60
-        for r in runs
-        if r["started_at"] and r["finished_at"]
-    ]
+    # started_at -> finished_at: active session time.
+    latencies = _minutes_between(runs, "started_at", "finished_at")
     median_latency = statistics.median(latencies) if latencies else None
+    # created_at -> finished_at: label applied to a result, over finished runs.
+    label_to_result = _minutes_between(runs, "created_at", "finished_at")
+    median_label_to_result = (
+        statistics.median(label_to_result) if label_to_result else None
+    )
+    # created_at -> finished_at over runs that produced a PR.
+    label_to_pr = _minutes_between(
+        [r for r in runs if r["pr_url"]], "created_at", "finished_at"
+    )
+    median_label_to_pr = statistics.median(label_to_pr) if label_to_pr else None
 
     total_acus = sum(r["acus"] or 0 for r in runs)
-
-    finished = merged + by_state.get("pr_open", 0) + by_state.get(
-        "needs_human", 0
-    ) + by_state.get("failed", 0)
+    runs_at_cap = sum(
+        1
+        for r in runs
+        if r["finished_at"] and (r["acus"] or 0) >= settings.max_acu_per_session
+    )
 
     return {
         "total_runs": total,
         "by_state": by_state,
-        # pr_rate: fraction of all runs that produced a PR.
-        "pr_rate": pr_opened / total if total else 0.0,
+        "simulate": settings.simulate,
+        "repo": settings.github_repo,
+        "max_acu_per_session": settings.max_acu_per_session,
+        "acu_price_usd": settings.acu_price_usd,
+        "funnel": {
+            "labeled": total,
+            "sessions_started": sum(1 for r in runs if r["started_at"]),
+            "prs_opened": pr_opened,
+            "merged": merged,
+        },
+        "issues_completed": finished,
+        # pr_rate: fraction of finished runs that produced a PR.
+        "pr_rate": pr_opened / finished if finished else 0.0,
         # merge_rate: of the PRs Devin opened, how many were merged.
         "merge_rate": merged / pr_opened if pr_opened else 0.0,
         # resolution_rate: of finished runs, how many shipped a merged fix.
         "resolution_rate": merged / finished if finished else 0.0,
         "median_latency_minutes": median_latency,
+        "median_label_to_result_minutes": median_label_to_result,
+        "median_label_to_pr_minutes": median_label_to_pr,
         "total_acus": total_acus,
+        "acus_per_run": (total_acus / finished) if finished else None,
+        "acus_per_pr": (total_acus / pr_opened) if pr_opened else None,
         "acus_per_merged_fix": (total_acus / merged) if merged else None,
+        "runs_at_cap": runs_at_cap,
     }

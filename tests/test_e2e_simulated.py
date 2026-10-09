@@ -20,7 +20,11 @@ class FlakyRemoveGitHub(NullGitHubClient):
 
 
 def _drive(service, issue_number, polls=3):
-    run(service.enqueue_issue(issue_number, "t", f"https://x/{issue_number}", "body"))
+    run(
+        service.enqueue_issue(
+            issue_number, "t", f"https://x/{issue_number}", "body", source="test"
+        )
+    )
     run(service.dispatch_tick())
     for _ in range(polls):
         run(service.session_poll_tick())
@@ -63,7 +67,7 @@ def test_suspended_at_acu_cap_becomes_needs_human(settings, components):
     store, devin, github = components
     service = AutopilotService(settings, store, devin, github)
 
-    run(service.enqueue_issue(3, "t", "https://x/3", "body"))
+    run(service.enqueue_issue(3, "t", "https://x/3", "body", source="test"))
     run(service.dispatch_tick())
     run_row = store.by_state("running")[0]
 
@@ -92,7 +96,7 @@ def test_failed_label_removal_keeps_run_active(settings, components):
     github = FlakyRemoveGitHub()
     service = AutopilotService(settings, store, devin, github)
 
-    run(service.enqueue_issue(4, "t", "https://x/4", "body"))
+    run(service.enqueue_issue(4, "t", "https://x/4", "body", source="test"))
     run(service.dispatch_tick())
     # Session reaches terminal; finalize raises inside label removal.
     run(service.session_poll_tick())
@@ -102,7 +106,10 @@ def test_failed_label_removal_keeps_run_active(settings, components):
     assert run_row["issue_number"] == 4
     # The issue poller sees the trigger label still on, but must not be
     # able to start a second run for it.
-    assert run(service.enqueue_issue(4, "t", "https://x/4", "body")) == "already_active"
+    assert (
+        run(service.enqueue_issue(4, "t", "https://x/4", "body", source="test"))
+        == "already_active"
+    )
 
     github.fail_remove = False
     run(service.session_poll_tick())
@@ -115,8 +122,8 @@ def test_dispatch_respects_concurrency_cap(settings, components):
     service = AutopilotService(settings, store, devin, github)
     settings.max_concurrent_sessions = 1
 
-    run(service.enqueue_issue(10, "t", "https://x/10", "b"))
-    run(service.enqueue_issue(11, "t", "https://x/11", "b"))
+    run(service.enqueue_issue(10, "t", "https://x/10", "b", source="test"))
+    run(service.enqueue_issue(11, "t", "https://x/11", "b", source="test"))
     run(service.dispatch_tick())
 
     assert store.count_state("running") == 1
