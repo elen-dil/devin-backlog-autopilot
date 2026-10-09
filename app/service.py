@@ -78,7 +78,8 @@ class AutopilotService:
         except Exception as exc:
             self._store.add_event(run_id, "github_write", f"{op}: failed ({exc})")
             raise
-        self._store.add_event(run_id, "github_write", f"{op}: ok")
+        result = "skipped (simulate)" if self._s.simulate else "ok"
+        self._store.add_event(run_id, "github_write", f"{op}: {result}")
 
     def _record_status_change(self, run_id: int, status, status_detail) -> None:
         """Record a status_change event when the observed (status, detail)
@@ -155,7 +156,7 @@ class AutopilotService:
             )
             await self._gh_write(
                 run["id"],
-                "comment",
+                "comment startup failure",
                 self._github.comment,
                 issue_number,
                 f"Autopilot could not start a Devin session: `{exc}`",
@@ -181,7 +182,7 @@ class AutopilotService:
         )
         await self._gh_write(
             run["id"],
-            "comment",
+            "comment session started",
             self._github.comment,
             issue_number,
             f"Devin session started: {session.get('url')}\n"
@@ -318,7 +319,7 @@ class AutopilotService:
             )
         await self._gh_write(
             run["id"],
-            "comment",
+            "comment result",
             self._github.comment,
             issue_number,
             _finish_comment(

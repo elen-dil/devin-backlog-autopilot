@@ -2,7 +2,9 @@
 
 import json
 import os
+import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import httpx
@@ -10,6 +12,19 @@ import pandas as pd
 import streamlit as st
 
 API = os.environ.get("FASTAPI_BASE_URL", "http://localhost:8000")
+
+# Business timezone for all rendered timestamps. DISPLAY_TZ comes from the
+# environment (compose sets env_file); invalid values fall back to UTC.
+DISPLAY_TZ_NAME = os.environ.get("DISPLAY_TZ", "America/New_York")
+try:
+    DISPLAY_TZ = ZoneInfo(DISPLAY_TZ_NAME)
+    DISPLAY_TZ_ERROR = None
+except Exception:
+    DISPLAY_TZ = timezone.utc
+    DISPLAY_TZ_ERROR = DISPLAY_TZ_NAME
+    DISPLAY_TZ_NAME = "UTC"
+
+TS_FORMAT = "%b %d %H:%M:%S %Z"
 
 # Raw enum -> plain-language label. Raw state/outcome names are never shown.
 STATE_LABELS = {
@@ -58,6 +73,14 @@ def parse_ts(value):
     return ts
 
 
+def fmt_ts(value):
+    """Render a timestamp in DISPLAY_TZ, e.g. 'Oct 08 14:32:05 EDT'."""
+    ts = parse_ts(value)
+    if ts is None:
+        return "—"
+    return ts.astimezone(DISPLAY_TZ).strftime(TS_FORMAT)
+
+
 def fmt_delta(start, end):
     """Human-readable '4m' / '1h 5m' / '2d 3h' between two ISO timestamps."""
     start_ts, end_ts = parse_ts(start), parse_ts(end)
@@ -101,6 +124,112 @@ def outcome_label(outcome):
 
 def pretty_event(name):
     return str(name or "unknown").replace("_", " ").title()
+
+
+def friendly_github_write(detail):
+    """Translate 'github_write' detail '<op>: <result>' -> (text, is_error)."""
+    op, sep, result = detail.partition(":")
+    if not sep:
+        return f"GitHub write ({detail or 'no detail'})", False
+    op, result = op.strip(), result.strip()
+
+    if op.startswith("add_label"):
+        label = op[len("add_label"):].strip()
+        base = f"Added label {label}" if label else "Added label"
+    elif op.startswith("remove_label"):
+        label = op[len("remove_label"):].strip()
+        if label == "devin-remediate":
+            base = "Removed trigger label"
+        elif label:
+            base = f"Removed label {label}"
+        else:
+            base = "Removed label"
+    elif op.startswith("comment"):
+        context = op[len("comment"):].strip()
+        base = {
+            "session started": "Posted session link comment",
+            "result": "Posted result comment",
+            "startup failure": "Posted failure comment",
+        }.get(context, "Posted comment")
+    else:
+        base = f"GitHub write: {op}"
+
+    if not result or result == "ok":
+        return base, False
+    if result == "skipped (simulate)":
+        return f"{base} (skipped in simulate mode)", False
+    if result.startswith("failed"):
+        return f"{base} — failed", True
+    return f"{base} ({result})", False
+
+
+def friendly_event(event):
+    """Translate a raw run event into (plain-English text, is_error)."""
+    name = event.get("event") or ""
+    detail = (event.get("detail") or "").strip()
+
+    if name == "queued":
+        source = re.search(r"source=(\S+)", detail)
+        if source:
+            label = {
+                "webhook": "webhook",
+                "poller": "poller",
+                "simulate": "simulate injection",
+            }.get(source.group(1), source.group(1))
+            return f"Queued (via {label})", False
+        return "Queued", False
+
+    if name == "session_created":
+        return "Devin session started", False
+
+    if name == "status_change":
+        status_m = re.search(r"status=(\S+)", detail)
+        detail_m = re.search(r"detail=(.*)$", detail)
+        status = status_m.group(1) if status_m else None
+        sub = detail_m.group(1).strip() if detail_m else ""
+        if status == "running" and sub == "working":
+            return "Devin is working", False
+        if status == "running" and sub == "finished":
+            return "Devin finished", False
+        if status == "running" and sub == "waiting_for_user":
+            return "Devin is waiting for user input", False
+        if status == "suspended":
+            return f"Session suspended ({sub or 'no detail'})", False
+        if status == "exit":
+            return "Session exited", False
+        if status == "error":
+            return "Session errored", False
+        if status:
+            return f"Session status: {status} ({sub or '—'})", False
+        return f"Status changed ({detail or 'no detail'})", False
+
+    if name == "github_write":
+        return friendly_github_write(detail)
+
+    if name == "finalized":
+        outcome_m = re.search(r"outcome=(\S+)", detail)
+        state_m = re.search(r"state=(\S+)", detail)
+        if outcome_m:
+            outcome = outcome_m.group(1)
+            label = OUTCOME_LABELS.get(outcome)
+            if label is None and outcome == "failed":
+                label = "Failed"
+            if label is None and state_m:
+                label = state_label(state_m.group(1))
+            if label is None:
+                label = outcome.replace("_", " ").title()
+            return f"Finished: {label}", False
+        if state_m:
+            return f"Finished: {state_label(state_m.group(1))}", False
+        return f"Finished ({detail or 'no detail'})", False
+
+    if name == "error":
+        return f"Error: {detail or 'unknown'}", True
+
+    text = pretty_event(name)
+    if detail:
+        text = f"{text} — {detail}"
+    return text, False
 
 
 def short_title(run, limit=48):
@@ -174,8 +303,13 @@ def is_finished(run):
 # ---------------------------------------------------------------------------
 
 def render_banner(health, metrics):
+    if DISPLAY_TZ_ERROR is not None and not st.session_state.get("_tz_warned"):
+        st.session_state["_tz_warned"] = True
+        st.warning(
+            f"Invalid DISPLAY_TZ '{DISPLAY_TZ_ERROR}' — falling back to UTC."
+        )
     repo = metrics.get("repo") or "unknown repo"
-    refreshed = datetime.now().strftime("%H:%M:%S")
+    refreshed = datetime.now(DISPLAY_TZ).strftime(TS_FORMAT)
     if health.get("simulate"):
         st.warning(
             f"**SIMULATE MODE (fake data)** — {repo} — last refreshed {refreshed}"
@@ -202,7 +336,7 @@ def render_status(metrics, runs):
     if not active:
         st.caption("Nothing queued or running right now.")
         return
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(DISPLAY_TZ).isoformat()
     df = pd.DataFrame(
         [
             {
@@ -214,9 +348,12 @@ def render_status(metrics, runs):
             for r in active
         ]
     )
+    df["Session"] = df["Session"].where(df["Session"].notna(), None)
     st.dataframe(
         df,
-        column_config={"Session": st.column_config.LinkColumn("Session")},
+        column_config={
+            "Session": st.column_config.LinkColumn("Session", display_text="Open")
+        },
         hide_index=True,
         width="stretch",
     )
@@ -355,18 +492,35 @@ def render_throughput(metrics, runs):
         return
     df = pd.DataFrame(
         {
-            "Finished": [parse_ts(r["finished_at"]) for r in finished],
+            "Finished": pd.to_datetime(
+                [r["finished_at"] for r in finished], utc=True
+            ),
             "Completed": range(1, len(finished) + 1),
         }
     )
+    # Wall-clock times in DISPLAY_TZ; dropping tzinfo keeps the axis labels in
+    # the business timezone regardless of the viewer's browser timezone.
+    df["Finished"] = (
+        df["Finished"].dt.tz_convert(DISPLAY_TZ).dt.tz_localize(None)
+    )
+    span = df["Finished"].max() - df["Finished"].min()
+    time_format = "%H:%M" if span < pd.Timedelta(hours=24) else "%b %d %H:%M"
     chart = (
         alt.Chart(df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("Finished:T", title="Finished at"),
+            x=alt.X(
+                "Finished:T",
+                title=f"Finished at ({DISPLAY_TZ_NAME})",
+                axis=alt.Axis(format=time_format),
+            ),
             y=alt.Y("Completed:Q", title="Runs completed"),
             tooltip=[
-                alt.Tooltip("Finished:T", title="Finished at"),
+                alt.Tooltip(
+                    "Finished:T",
+                    title="Finished at",
+                    format="%b %d %H:%M:%S",
+                ),
                 alt.Tooltip("Completed:Q", title="Runs completed"),
             ],
         )
@@ -411,7 +565,8 @@ def render_cost(metrics, runs):
     cols[4].metric(
         "ACUs per merged fix",
         fmt_number(metrics.get("acus_per_merged_fix")),
-        help=f"Total ACUs ÷ merged fixes. {ACU_HELP}",
+        help=f"Total ACUs ÷ merged fixes. Includes compute spent on runs "
+        f"that did not merge. {ACU_HELP}",
     )
 
     st.subheader("ACUs per run")
@@ -474,6 +629,7 @@ def render_runs(runs):
                 "Issue": issue_ref(r),
                 "Status": state_label(r.get("state")),
                 "Outcome": outcome_label(r.get("outcome")),
+                "Finished": fmt_ts(r.get("finished_at")),
                 "Time to result": fmt_delta(r.get("created_at"), r.get("finished_at")),
                 "ACUs used": "—" if r.get("acus") is None else f"{r['acus']:.1f}",
                 "Tests": tests_text(r),
@@ -483,13 +639,16 @@ def render_runs(runs):
             for r in runs
         ]
     )
+    # LinkColumn renders NaN literally; normalize missing URLs to None.
+    for col in ("Session", "PR"):
+        df[col] = df[col].where(df[col].notna(), None)
     event = st.dataframe(
         df,
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "Session": st.column_config.LinkColumn("Session"),
-            "PR": st.column_config.LinkColumn("PR"),
+            "Session": st.column_config.LinkColumn("Session", display_text="Open"),
+            "PR": st.column_config.LinkColumn("PR", display_text="Open"),
         },
         hide_index=True,
         width="stretch",
@@ -553,17 +712,19 @@ def render_run_detail(run):
     if not events:
         st.caption("No events recorded for this run.")
         return
-    rows = []
     for e in events:
-        ts = parse_ts(e.get("timestamp"))
-        rows.append(
+        text, is_error = friendly_event(e)
+        marker = "⚠️ " if is_error else ""
+        st.markdown(f"- {fmt_ts(e.get('timestamp'))} — {marker}{text}")
+    with st.expander("Raw event details"):
+        raw = pd.DataFrame(
             {
-                "Time": ts.strftime("%Y-%m-%d %H:%M:%S") if ts else "—",
-                "Event": pretty_event(e.get("event")),
-                "Detail": e.get("detail") or "—",
+                "Time": [fmt_ts(e.get("timestamp")) for e in events],
+                "Event": [e.get("event") or "—" for e in events],
+                "Detail": [e.get("detail") or "—" for e in events],
             }
         )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.dataframe(raw, hide_index=True, width="stretch")
 
 
 # ---------------------------------------------------------------------------

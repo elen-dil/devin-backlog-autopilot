@@ -15,6 +15,7 @@ services:
   dashboard:
     build: .
     command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    env_file: .env
     environment:
       FASTAPI_BASE_URL: http://api:8000
     ports:

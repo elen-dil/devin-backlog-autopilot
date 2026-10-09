@@ -3,12 +3,14 @@ import dataclasses
 import hashlib
 import hmac
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.service import compute_metrics
+from app.store import RunStore
 
 SECRET = "test-secret"
 
@@ -103,8 +105,10 @@ def test_run_events_cover_full_lifecycle(settings, components):
     # GitHub write-backs are recorded on both sides of finalize.
     writes = [e["detail"] for e in events if e["event"] == "github_write"]
     assert len(writes) == 6
-    assert all(d.endswith(": ok") for d in writes)
+    assert all(d.endswith(": skipped (simulate)") for d in writes)
     assert "add_label devin-running" in writes[0]
+    assert any(d.startswith("comment session started") for d in writes)
+    assert any(d.startswith("comment result") for d in writes)
     last_write = max(i for i, n in enumerate(names) if n == "github_write")
     assert names.index("finalized") < last_write
     assert names[-1] == "github_write"
@@ -301,3 +305,59 @@ def test_simulated_runs_included_when_simulating(settings, components):
     store.enqueue(2, "t", "https://x/2", "b", is_simulated=False)
     runs = client.get("/api/v1/runs").json()["runs"]
     assert len(runs) == 2
+
+
+# The runs schema as it existed before the is_simulated column was added.
+_PRE_MIGRATION_RUNS_SCHEMA = """
+CREATE TABLE runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    issue_url TEXT NOT NULL,
+    issue_body TEXT,
+    state TEXT NOT NULL DEFAULT 'queued',
+    session_id TEXT,
+    session_url TEXT,
+    pr_url TEXT,
+    outcome TEXT,
+    summary TEXT,
+    tests_run INTEGER,
+    tests_passed INTEGER,
+    acus REAL,
+    output_json TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    merged_at TEXT
+);
+"""
+
+
+def test_is_simulated_backfill_on_pre_migration_db(tmp_path):
+    """Opening a pre-migration DB adds is_simulated and backfills rows whose
+    session_id came from SimulatedDevinClient (devin-sim-*)."""
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.execute(_PRE_MIGRATION_RUNS_SCHEMA)
+    conn.execute(
+        "INSERT INTO runs (issue_number, title, issue_url, state, session_id,"
+        " created_at) VALUES (1, 't', 'https://x/1', 'failed', 'devin-sim-abc',"
+        " '2024-01-01T00:00:00+00:00')"
+    )
+    conn.execute(
+        "INSERT INTO runs (issue_number, title, issue_url, state, session_id,"
+        " created_at) VALUES (2, 't', 'https://x/2', 'failed', 'devin-real-xyz',"
+        " '2024-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = RunStore(path)
+    rows = {r["issue_number"]: r for r in store.all()}
+    assert rows[1]["is_simulated"] == 1
+    assert rows[2]["is_simulated"] == 0
+
+    # Re-opening is idempotent: the column now exists, so no migration runs.
+    assert RunStore(path).get(1)["is_simulated"] == 1
+    assert RunStore(path).get(2)["is_simulated"] == 0

@@ -77,6 +77,12 @@ class RunStore:
                     "ALTER TABLE runs ADD COLUMN"
                     " is_simulated INTEGER NOT NULL DEFAULT 0"
                 )
+                # Simulated sessions always get devin-sim-* ids from
+                # SimulatedDevinClient; mark their rows retroactively.
+                self._conn.execute(
+                    "UPDATE runs SET is_simulated = 1"
+                    " WHERE session_id LIKE 'devin-sim-%'"
+                )
                 self._conn.commit()
 
     def enqueue(
