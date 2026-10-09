@@ -465,12 +465,27 @@ def render_runs_table(runs):
         st.caption("No runs yet — waiting for issues labeled `devin-remediate`.")
         return
 
-    ordered = sorted(
-        runs,
-        key=lambda r: parse_ts(r.get("created_at"))
-        or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
+    # Attention order: in-flight work first, then blockers, then finished
+    # runs, each group most recent first.
+    state_rank = {
+        "running": 0,
+        "queued": 1,
+        "needs_human": 2,
+        "pr_open": 3,
+        "failed": 4,
+        "merged": 5,
+    }
+
+    def sort_key(run):
+        ts = (
+            parse_ts(run.get("finished_at"))
+            or parse_ts(run.get("started_at"))
+            or parse_ts(run.get("created_at"))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        return (state_rank.get(run.get("state"), 9), -ts.timestamp())
+
+    ordered = sorted(runs, key=sort_key)
     now = datetime.now(DISPLAY_TZ).isoformat()
     df = pd.DataFrame(
         [
@@ -714,7 +729,6 @@ def render_cost(metrics, runs):
         {
             "Run": [issue_ref(r) for r in billable],
             "ACUs": [r["acus"] for r in billable],
-            "order": range(len(billable)),
             "at_cap": [
                 bool(cap is not None and r["acus"] >= cap) for r in billable
             ],
@@ -723,9 +737,11 @@ def render_cost(metrics, runs):
     # Horizontal bars: run names read left-to-right on the y axis, so they
     # stay legible instead of truncating like rotated x-axis labels. Vega-Lite
     # axis labels can't carry tooltips; hovering a bar shows the full name.
+    # Highest spend at the top.
+    by_acus = sorted(billable, key=lambda r: r["acus"], reverse=True)
     y = alt.Y(
         "Run:N",
-        sort=[issue_ref(r) for r in reversed(billable)],
+        sort=[issue_ref(r) for r in by_acus],
         title=None,
         axis=alt.Axis(labelLimit=340, labelOverlap=False),
     )
