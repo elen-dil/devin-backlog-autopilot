@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY dashboard ./dashboard
+COPY .streamlit ./.streamlit
 
 ENV DATABASE_PATH=/data/autopilot.db
 
