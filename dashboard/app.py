@@ -1,5 +1,6 @@
 """Autopilot dashboard. Reads only from the FastAPI endpoints, never the DB."""
 
+import html
 import json
 import os
 import re
@@ -322,6 +323,24 @@ def render_banner(health, metrics):
         st.caption(f":green[**LIVE**] · {repo} · refreshed {refreshed}")
 
 
+def _kpi_tile(label, value, help_text):
+    """Render one KPI tile as HTML with a native title tooltip.
+
+    Streamlit's `help=` tooltips live in a portal that can outlive its anchor
+    when the auto-refresh fragment recreates the metric DOM, leaving orphan
+    tooltip boxes that overlap newer ones. A native `title` tooltip is bound
+    to the element itself, so it can never be orphaned.
+    """
+    tip = html.escape(help_text, quote=True)
+    return (
+        '<div class="kpi">'
+        f'<div class="kpi-label">{html.escape(label)}'
+        f'<span class="kpi-help" title="{tip}">?</span></div>'
+        f'<div class="kpi-value">{html.escape(value)}</div>'
+        "</div>"
+    )
+
+
 def render_kpis(metrics, runs):
     """One always-visible row of grouped KPI tiles."""
     counts = by_state_counts(metrics, runs)
@@ -329,51 +348,69 @@ def render_kpis(metrics, runs):
 
     with status_col:
         st.caption("**Status**")
-        st.metric(
-            "Active",
-            f"{counts['running']} running · {counts['queued']} queued",
-            help="Runs with a live Devin session, plus labeled issues waiting "
-            "for a free session slot (MAX_CONCURRENT_SESSIONS).",
+        st.markdown(
+            _kpi_tile(
+                "Active",
+                f"{counts['running']} running · {counts['queued']} queued",
+                "Runs with a live Devin session, plus labeled issues waiting "
+                "for a free session slot (MAX_CONCURRENT_SESSIONS).",
+            ),
+            unsafe_allow_html=True,
         )
 
     with eff_col:
         st.caption("**Effectiveness**")
         res_col, merge_col = st.columns(2)
-        res_col.metric(
-            "Resolution rate",
-            fmt_pct(metrics.get("resolution_rate")),
-            help="Share of finished runs that ended in a merged fix. "
-            "Formula: merged runs ÷ finished runs.",
+        res_col.markdown(
+            _kpi_tile(
+                "Resolution rate",
+                fmt_pct(metrics.get("resolution_rate")),
+                "Share of finished runs that ended in a merged fix. "
+                "Formula: merged runs ÷ finished runs.",
+            ),
+            unsafe_allow_html=True,
         )
-        merge_col.metric(
-            "Merge rate",
-            fmt_pct(metrics.get("merge_rate")),
-            help="Share of opened PRs that were merged. "
-            "Formula: merged ÷ PRs opened.",
+        merge_col.markdown(
+            _kpi_tile(
+                "Merge rate",
+                fmt_pct(metrics.get("merge_rate")),
+                "Share of opened PRs that were merged. "
+                "Formula: merged ÷ PRs opened.",
+            ),
+            unsafe_allow_html=True,
         )
 
     with thr_col:
         st.caption("**Throughput**")
-        st.metric(
-            "Median time to PR",
-            fmt_minutes(metrics.get("median_label_to_pr_minutes")),
-            help="Median minutes from an issue being labeled to its PR "
-            "opening. Formula: median(PR opened time − labeled time).",
+        st.markdown(
+            _kpi_tile(
+                "Median time to PR",
+                fmt_minutes(metrics.get("median_label_to_pr_minutes")),
+                "Median minutes from an issue being labeled to its PR "
+                "opening. Formula: median(PR opened time − labeled time).",
+            ),
+            unsafe_allow_html=True,
         )
 
     with cost_col:
         st.caption("**Cost**")
         total_col, per_fix_col = st.columns(2)
-        total_col.metric(
-            "Total ACUs",
-            f"{(metrics.get('total_acus') or 0):.1f}",
-            help=f"Sum of ACUs consumed across all runs. {ACU_HELP}",
+        total_col.markdown(
+            _kpi_tile(
+                "Total ACUs",
+                f"{(metrics.get('total_acus') or 0):.1f}",
+                f"Sum of ACUs consumed across all runs. {ACU_HELP}",
+            ),
+            unsafe_allow_html=True,
         )
-        per_fix_col.metric(
-            "ACUs / merged fix",
-            fmt_number(metrics.get("acus_per_merged_fix")),
-            help="Total ACUs ÷ merged fixes. Includes compute spent on runs "
-            f"that did not merge. {ACU_HELP}",
+        per_fix_col.markdown(
+            _kpi_tile(
+                "ACUs / merged fix",
+                fmt_number(metrics.get("acus_per_merged_fix")),
+                "Total ACUs ÷ merged fixes. Includes compute spent on runs "
+                f"that did not merge. {ACU_HELP}",
+            ),
+            unsafe_allow_html=True,
         )
 
 
@@ -465,18 +502,18 @@ def render_runs_table(runs):
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "Issue": st.column_config.TextColumn(width=210),
-            "Status": st.column_config.TextColumn(width=130),
-            "Time to result": st.column_config.TextColumn(width=90),
-            "ACUs": st.column_config.TextColumn(width=55),
+            "Issue": st.column_config.TextColumn(width=190),
+            "Status": st.column_config.TextColumn(width=120),
+            "Time to result": st.column_config.TextColumn(width=85),
+            "ACUs": st.column_config.TextColumn(width=50),
             "Session": st.column_config.LinkColumn(
-                "Session", display_text="Open", width=70
+                "Session", display_text="Open", width=65
             ),
             "PR": st.column_config.LinkColumn(
                 "PR", display_text="Open", width=45
             ),
             "Details": st.column_config.ButtonColumn(
-                "Details", key="run_detail_click", width=70
+                "Details", key="run_detail_click", width=65
             ),
         },
         height=height,
@@ -730,8 +767,12 @@ st.set_page_config(page_title="Devin Backlog Autopilot", layout="wide")
 # Tighten Streamlit's default page padding so the KPI row plus the Overview
 # tab fit a ~1440x900 laptop screen without scrolling.
 st.markdown(
-    "<style>.block-container{padding-top:1.75rem;padding-bottom:1rem;}"
-    "[data-testid='stMetricValue']{font-size:1.55rem;}</style>",
+    """<style>
+.block-container{padding-top:1.75rem;padding-bottom:1rem;}
+.kpi-label{font-size:.875rem;color:rgba(49,51,63,.6);display:flex;align-items:center;gap:.35rem;}
+.kpi-help{display:inline-flex;align-items:center;justify-content:center;width:.95rem;height:.95rem;border-radius:50%;border:1px solid rgba(49,51,63,.45);font-size:.62rem;color:rgba(49,51,63,.55);cursor:help;}
+.kpi-value{font-size:1.55rem;font-weight:400;color:#31333F;line-height:1.4;}
+</style>""",
     unsafe_allow_html=True,
 )
 st.title("Devin Backlog Autopilot")
