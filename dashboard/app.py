@@ -32,14 +32,14 @@ TS_FORMAT = "%b %d %H:%M:%S %Z"
 STATE_LABELS = {
     "queued": "Queued",
     "running": "Running",
-    "pr_open": "PR awaiting review",
+    "pr_open": "Awaiting merge",
     "merged": "Merged",
     "needs_human": "Needs human",
     "failed": "Failed",
 }
 STATE_ORDER = list(STATE_LABELS)
 OUTCOME_LABELS = {
-    "fixed": "Fixed",
+    "fixed": "Fix proposed",
     "needs_human": "Needs human",
     "not_reproducible": "Not reproducible",
     "failed": "Failed",
