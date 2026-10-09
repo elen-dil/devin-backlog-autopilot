@@ -2,6 +2,7 @@
 
 import html
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -122,6 +123,15 @@ def fmt_number(value):
 
 def fmt_pct(value):
     return "n/a" if value is None else f"{value:.0%}"
+
+
+def integer_axis(max_value, max_ticks=6):
+    """Count axis with whole-number ticks. Vega auto-ticks can land on
+    fractions (e.g. 0.5) that format="d" rounds into duplicate labels, and
+    tickMinStep doesn't reliably prevent that, so pin the values."""
+    top = max(1, math.ceil(max_value))
+    step = max(1, math.ceil(top / max_ticks))
+    return alt.Axis(format="d", values=list(range(0, top + step, step)))
 
 
 def state_label(state):
@@ -452,7 +462,7 @@ def render_funnel(metrics, runs):
             x=alt.X(
                 "Count:Q",
                 title="Issues",
-                axis=alt.Axis(format="d", tickMinStep=1),
+                axis=integer_axis(df["Count"].max()),
             ),
             y=alt.Y(
                 "Stage:N",
@@ -723,7 +733,7 @@ def render_trends(metrics, runs):
                     y=alt.Y(
                         "Completed:Q",
                         title="Runs completed",
-                        axis=alt.Axis(format="d", tickMinStep=1),
+                        axis=integer_axis(counts["Completed"].max()),
                     ),
                     tooltip=[
                         alt.Tooltip(
@@ -764,7 +774,7 @@ def render_trends(metrics, runs):
                     x=alt.X(
                         "Runs:Q",
                         title="Runs",
-                        axis=alt.Axis(format="d", tickMinStep=1),
+                        axis=integer_axis(df["Runs"].max()),
                     ),
                     y=alt.Y("Outcome:N", sort="-x", title=None),
                     tooltip=["Outcome", "Runs"],
@@ -877,12 +887,12 @@ st.set_page_config(page_title="Devin Backlog Autopilot", layout="wide")
 st.markdown(
     """<style>
 .block-container{padding-top:1.75rem;padding-bottom:1rem;}
-.kpi-label{font-size:.875rem;color:rgba(49,51,63,.6);display:flex;align-items:center;gap:.35rem;}
-.kpi-help{position:relative;display:inline-flex;align-items:center;justify-content:center;width:.95rem;height:.95rem;border-radius:50%;border:1px solid rgba(49,51,63,.45);font-size:.62rem;color:rgba(49,51,63,.55);cursor:help;}
+.kpi-label{font-size:.875rem;color:var(--text-color);color:color-mix(in srgb,var(--text-color) 60%,transparent);display:flex;align-items:center;gap:.35rem;}
+.kpi-help{position:relative;display:inline-flex;align-items:center;justify-content:center;width:.95rem;height:.95rem;border-radius:50%;border:1px solid var(--text-color);border-color:color-mix(in srgb,var(--text-color) 45%,transparent);font-size:.62rem;color:var(--text-color);color:color-mix(in srgb,var(--text-color) 55%,transparent);cursor:help;}
 .kpi-help::after{content:attr(data-tip);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);width:max-content;max-width:15rem;white-space:normal;text-align:left;background:#31333F;color:#fff;font-size:.75rem;font-weight:400;line-height:1.45;padding:.45rem .6rem;border-radius:.375rem;box-shadow:0 4px 12px rgba(0,0,0,.18);opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:100;}
 .kpi-help::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:4px solid transparent;border-bottom-color:#31333F;opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:100;}
 .kpi-help:hover::after,.kpi-help:hover::before{opacity:1;visibility:visible;}
-.kpi-value{font-size:1.55rem;font-weight:400;color:#31333F;line-height:1.4;}
+.kpi-value{font-size:1.55rem;font-weight:400;color:var(--text-color);line-height:1.4;}
 </style>""",
     unsafe_allow_html=True,
 )
