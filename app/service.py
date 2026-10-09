@@ -417,11 +417,18 @@ def compute_metrics(runs, settings) -> dict:
         "repo": settings.github_repo,
         "max_acu_per_session": settings.max_acu_per_session,
         "acu_price_usd": settings.acu_price_usd,
+        # Funnel counts distinct issues at every stage: an issue remediated
+        # twice still counts once, keeping the funnel monotonic. Retries
+        # still show up in ACU totals.
         "funnel": {
-            "labeled": total,
-            "sessions_started": sum(1 for r in runs if r["started_at"]),
-            "prs_opened": pr_opened,
-            "merged": merged,
+            "labeled": len({r["issue_number"] for r in runs}),
+            "sessions_started": len(
+                {r["issue_number"] for r in runs if r["started_at"]}
+            ),
+            "prs_opened": len({r["issue_number"] for r in runs if r["pr_url"]}),
+            "merged": len(
+                {r["issue_number"] for r in runs if r["state"] == "merged"}
+            ),
         },
         "issues_completed": finished,
         # pr_rate: fraction of finished runs that produced a PR.

@@ -249,6 +249,24 @@ def test_metrics_hand_computed(settings, components):
     assert m["runs_at_cap"] == 1
 
 
+def test_funnel_counts_distinct_issues(settings, components):
+    """Re-remediated issues count once per funnel stage, keeping it monotonic."""
+    store, _, _ = components
+    _insert_run(store, 7, "needs_human", created=0, started=1, finished=2)
+    _insert_run(store, 7, "merged", created=3, started=4, finished=5,
+                pr_url="https://x/pull/7")
+    _insert_run(store, 8, "queued", created=0)
+
+    m = compute_metrics(store.all(), settings)
+    assert m["total_runs"] == 3
+    assert m["funnel"] == {
+        "labeled": 2,
+        "sessions_started": 1,
+        "prs_opened": 1,
+        "merged": 1,
+    }
+
+
 def test_metrics_endpoint_and_empty_guards(settings, components):
     _, client = _client(settings, components)
     m = client.get("/api/v1/metrics").json()
