@@ -414,9 +414,18 @@ def _append(existing: str, note: str) -> str:
     return f"{existing}\n{note}".strip() if existing else note
 
 
+OUTCOME_VERDICTS = {
+    "fixed": "fix proposed",
+    "needs_human": "needs human review",
+    "not_reproducible": "not reproducible",
+    "failed": "failed",
+}
+
+
 def _finish_comment(**f) -> str:
+    verdict = OUTCOME_VERDICTS.get(f["outcome"], f["outcome"])
     lines = [
-        f"Autopilot finished: outcome `{f['outcome']}`",
+        f"Autopilot finished: {verdict}",
         f"Session: {f['session_url']}",
         f"PR: {f['pr_url'] or 'none'}",
         f"Summary: {f['summary'] or 'n/a'}",
