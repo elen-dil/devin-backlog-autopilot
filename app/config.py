@@ -30,6 +30,7 @@ class Settings:
     merge_check_seconds: int
     dispatch_seconds: int
     database_path: str
+    acu_backfill_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,6 +51,7 @@ class Settings:
             merge_check_seconds=_int("MERGE_CHECK_SECONDS", 300),
             dispatch_seconds=_int("DISPATCH_SECONDS", 5),
             database_path=os.environ.get("DATABASE_PATH", "./data/autopilot.db"),
+            acu_backfill_seconds=_int("ACU_BACKFILL_SECONDS", 60),
         )
 
     def validate(self) -> None:

@@ -28,6 +28,11 @@ QUOTA_DETAILS = {
     "total_session_limit_exceeded",
 }
 
+# Devin posts ACU usage to the session object asynchronously, so the reading
+# at termination is often stale (frequently still 0). Keep re-polling
+# finalized runs until the session exits or this window elapses.
+ACU_SETTLE_SECONDS = 30 * 60
+
 
 def session_is_terminal(status: str, status_detail) -> bool:
     """Terminal = exit/error/suspended, or running with a finished/waiting detail."""
@@ -95,6 +100,18 @@ class AutopilotService:
         )
         if observed != last:
             self._store.add_event(run_id, "status_change", observed)
+
+    def _record_acus(self, run: dict, acus, *, event: bool = False) -> None:
+        """Persist the latest ACU reading when the API reports a new one.
+        Live polls stay silent (the value ticks up every pass); only
+        post-finalize corrections get an acus_updated event."""
+        if acus is None or acus == run["acus"]:
+            return
+        self._store.update(run["id"], acus=acus)
+        if event:
+            self._store.add_event(
+                run["id"], "acus_updated", f"{run['acus']} -> {acus}"
+            )
 
     async def issue_poll_tick(self) -> None:
         """Adopt open issues carrying the trigger label."""
@@ -226,6 +243,7 @@ class AutopilotService:
             self._record_status_change(
                 run["id"], session.get("status"), session.get("status_detail")
             )
+            self._record_acus(run, session.get("acus_consumed"))
             if session_is_terminal(session.get("status"), session.get("status_detail")):
                 try:
                     await self._finalize(run, session)
@@ -249,6 +267,11 @@ class AutopilotService:
             None,
         )
         blockers = output.get("blockers") or ""
+        acus = session.get("acus_consumed")
+        # Consumption only grows and live polls may already have stored a
+        # higher value; never let the finalize snapshot move it backwards.
+        if run["acus"] is not None and (acus is None or acus < run["acus"]):
+            acus = run["acus"]
 
         if outcome == "fixed" and pr_url:
             state, label = "pr_open", self._s.pr_open_label
@@ -299,7 +322,7 @@ class AutopilotService:
             summary=output.get("summary"),
             tests_run=output.get("tests_run"),
             tests_passed=output.get("tests_passed"),
-            acus=session.get("acus_consumed"),
+            acus=acus,
             output_json=json.dumps(output) if output else None,
             error=None if state != "failed" else f"status={status} detail={detail}",
             finished_at=_now(),
@@ -336,16 +359,55 @@ class AutopilotService:
                 tests_passed=output.get("tests_passed"),
                 risk_notes=output.get("risk_notes"),
                 blockers=blockers,
-                acus=session.get("acus_consumed"),
+                acus=acus,
                 error=f"status={status} detail={detail}" if state == "failed" else None,
             ),
         )
+
+        # Sessions that end on a finished/waiting_for_user detail are still
+        # "running" and would linger suspended until inactivity timeout.
+        # Terminate explicitly so they close out promptly.
+        if status == "running" and run["session_id"]:
+            try:
+                await self._devin.terminate_session(run["session_id"])
+                self._store.add_event(run["id"], "session_terminated")
+            except Exception:
+                logger.exception(
+                    "terminate failed for session %s", run["session_id"]
+                )
 
     async def merge_check_tick(self) -> None:
         """Mark pr_open runs as merged once GitHub reports the PR merged."""
         for run in self._store.by_state("pr_open"):
             if run["pr_url"] and await self._github.pr_is_merged(run["pr_url"]):
                 self._store.update(run["id"], state="merged", merged_at=_now())
+
+    async def acu_backfill_tick(self) -> None:
+        """Re-poll recently-finalized sessions for ACU usage. Usage posts to
+        the session object asynchronously, so the finalize-time snapshot is
+        often stale; keep refreshing until the session reports 'exit' (a
+        session_ended marker stops further polls) or the settle window ends."""
+        finalized = self._store.by_state(
+            "pr_open", "merged", "needs_human", "failed"
+        )
+        for run in finalized:
+            if not run["session_id"] or not run["finished_at"]:
+                continue
+            if _older_than(run["finished_at"], ACU_SETTLE_SECONDS):
+                continue
+            if any(
+                e["event"] == "session_ended"
+                for e in self._store.events_for(run["id"])
+            ):
+                continue
+            try:
+                session = await self._devin.get_session(run["session_id"])
+            except Exception:
+                logger.exception("ACU backfill failed for run %s", run["id"])
+                continue
+            self._record_acus(run, session.get("acus_consumed"), event=True)
+            if session.get("status") == "exit":
+                self._store.add_event(run["id"], "session_ended")
 
 
 def _append(existing: str, note: str) -> str:
@@ -414,6 +476,20 @@ def compute_metrics(runs, settings) -> dict:
         for r in runs
         if r["finished_at"] and (r["acus"] or 0) >= settings.max_acu_per_session
     )
+    # A finished run with no reported usage is "pending" — Devin posts ACUs
+    # asynchronously (or not at all). Pending runs are excluded from the ACU
+    # averages so a lagged 0.0 can't understate them.
+    measured = [r for r in runs if (r["acus"] or 0) > 0]
+    acus_pending = sum(
+        1 for r in runs if r["finished_at"] and not (r["acus"] or 0)
+    )
+    measured_finished = sum(1 for r in measured if r["finished_at"])
+    measured_prs = sum(1 for r in measured if r["pr_url"])
+    measured_merged = sum(1 for r in measured if r["state"] == "merged")
+
+    # Devin doesn't always meter per-session usage, so session wall-clock
+    # time (started_at -> finished_at) is the reliable cost proxy.
+    total_session_minutes = sum(latencies)
 
     return {
         "total_runs": total,
@@ -445,8 +521,22 @@ def compute_metrics(runs, settings) -> dict:
         "median_label_to_result_minutes": median_label_to_result,
         "median_label_to_pr_minutes": median_label_to_pr,
         "total_acus": total_acus,
-        "acus_per_run": (total_acus / finished) if finished else None,
-        "acus_per_pr": (total_acus / pr_opened) if pr_opened else None,
-        "acus_per_merged_fix": (total_acus / merged) if merged else None,
+        "acus_pending": acus_pending,
+        "acus_per_run": (
+            (total_acus / measured_finished) if measured_finished else None
+        ),
+        "acus_per_pr": (
+            (total_acus / measured_prs) if measured_prs else None
+        ),
+        "acus_per_merged_fix": (
+            (total_acus / measured_merged) if measured_merged else None
+        ),
         "runs_at_cap": runs_at_cap,
+        "total_session_minutes": total_session_minutes,
+        "session_minutes_per_run": (
+            (total_session_minutes / len(latencies)) if latencies else None
+        ),
+        "session_minutes_per_merged_fix": (
+            (total_session_minutes / merged) if merged else None
+        ),
     }

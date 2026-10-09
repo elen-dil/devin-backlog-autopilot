@@ -139,6 +139,10 @@ class DevinClient:
     async def get_session(self, session_id: str):
         return await self._request("GET", f"/sessions/{session_id}")
 
+    async def terminate_session(self, session_id: str):
+        """DELETE /sessions/{id}: ends the session; it cannot be resumed."""
+        return await self._request("DELETE", f"/sessions/{session_id}")
+
 
 class SimulatedDevinClient:
     """Fake Devin API for SIMULATE mode. Sessions finish after a few polls."""
@@ -148,6 +152,7 @@ class SimulatedDevinClient:
     def __init__(self):
         self._sessions = {}
         self._planned_outcomes = {}
+        self.terminated = []
 
     def plan_outcome(self, issue_number: int, outcome: str) -> None:
         self._planned_outcomes[issue_number] = outcome
@@ -219,3 +224,7 @@ class SimulatedDevinClient:
                 ),
             },
         }
+
+    async def terminate_session(self, session_id: str):
+        self.terminated.append(session_id)
+        return {"session_id": session_id, "status": "exit"}

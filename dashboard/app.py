@@ -48,8 +48,9 @@ OUTCOME_LABELS = {
 TERMINAL_STATES = {"merged", "needs_human", "failed"}
 
 ACU_HELP = (
-    "ACU = Agent Compute Unit: Devin's unit of compute billing. "
-    "Each session is capped at MAX_ACU_PER_SESSION."
+    "ACU = Agent Compute Unit: Devin's unit of compute billing. Per-session "
+    "usage isn't always reported, so session time (start to finish) is the "
+    "reliable cost proxy; ACUs are shown where Devin reports them."
 )
 
 # Dataframe row height is ~35px; header counts as one row.
@@ -123,6 +124,23 @@ def fmt_number(value):
 
 def fmt_pct(value):
     return "n/a" if value is None else f"{value:.0%}"
+
+
+def acu_display(run) -> str:
+    """ACU cell text: 'pending' once a run is finished but usage hasn't been
+    reported, '—' while still running with no reading yet."""
+    acus = run.get("acus")
+    if run.get("finished_at") and not acus:
+        return "pending"
+    return "—" if acus is None else f"{acus:.1f}"
+
+
+def session_minutes(run):
+    """Minutes between started_at and finished_at, or None for in-flight."""
+    start, end = parse_ts(run.get("started_at")), parse_ts(run.get("finished_at"))
+    if not start or not end:
+        return None
+    return (end - start).total_seconds() / 60
 
 
 def integer_axis(max_value, max_ticks=6):
@@ -246,6 +264,12 @@ def friendly_event(event):
         if state_m:
             return f"Finished: {state_label(state_m.group(1))}", False
         return f"Finished ({detail or 'no detail'})", False
+
+    if name == "acus_updated":
+        return f"ACU usage updated: {detail or '?'}", False
+
+    if name in ("session_terminated", "session_ended"):
+        return "Devin session ended", False
 
     if name == "error":
         return f"Error: {detail or 'unknown'}", True
@@ -426,18 +450,18 @@ def render_kpis(metrics, runs):
         total_col, per_fix_col = st.columns(2)
         total_col.markdown(
             _kpi_tile(
-                "Total ACUs",
-                f"{(metrics.get('total_acus') or 0):.1f}",
-                f"Sum of ACUs consumed across all runs. {ACU_HELP}",
+                "Session minutes",
+                fmt_minutes(metrics.get("total_session_minutes")),
+                f"Total Devin session time across finished runs. {ACU_HELP}",
             ),
             unsafe_allow_html=True,
         )
         per_fix_col.markdown(
             _kpi_tile(
-                "ACUs / merged fix",
-                fmt_number(metrics.get("acus_per_merged_fix")),
-                "Total ACUs ÷ merged fixes. Includes compute spent on runs "
-                f"that did not merge. {ACU_HELP}",
+                "Min / merged fix",
+                fmt_minutes(metrics.get("session_minutes_per_merged_fix")),
+                "Total session minutes ÷ merged fixes. Includes time spent "
+                f"on runs that did not merge. {ACU_HELP}",
             ),
             unsafe_allow_html=True,
         )
@@ -531,7 +555,7 @@ def render_runs_table(runs):
                 "Time to result": fmt_delta(
                     r.get("created_at"), r.get("finished_at") or now
                 ),
-                "ACUs": "—" if r.get("acus") is None else f"{r['acus']:.1f}",
+                "ACUs": acu_display(r),
                 "Session": r.get("session_url"),
                 "PR": r.get("pr_url"),
                 "Details": "View",
@@ -555,7 +579,7 @@ def render_runs_table(runs):
             "Issue": st.column_config.TextColumn(width=320),
             "Status": st.column_config.TextColumn(width=120),
             "Time to result": st.column_config.TextColumn(width=85),
-            "ACUs": st.column_config.TextColumn(width=50),
+            "ACUs": st.column_config.TextColumn(width=70),
             "Session": st.column_config.LinkColumn(
                 "Session", display_text="Open", width=65
             ),
@@ -604,7 +628,7 @@ def run_detail_dialog(run):
     st.caption(
         f"Status: {state_label(run.get('state'))} · "
         f"Outcome: {outcome_label(run.get('outcome'))} · "
-        f"ACUs: {run.get('acus') if run.get('acus') is not None else '—'} · "
+        f"ACUs: {acu_display(run)} · "
         f"Tests: {tests_text(run)}"
     )
     if run.get("error"):
@@ -784,97 +808,54 @@ def render_trends(metrics, runs):
 
 
 def render_cost(metrics, runs):
-    st.markdown("##### ACUs per run")
-    cap = metrics.get("max_acu_per_session")
-    runs_at_cap = metrics.get("runs_at_cap")
-    if runs_at_cap is None and cap is not None:
-        runs_at_cap = sum(
-            1 for r in runs if r.get("acus") is not None and r["acus"] >= cap
-        )
-
-    billable = [r for r in runs if r.get("acus") is not None]
-    if not billable:
-        st.caption("No ACU usage recorded yet.")
+    st.markdown("##### Session time per run")
+    # Devin doesn't always meter per-session ACUs, so wall-clock session
+    # time is the cost proxy; reported ACUs ride along as a secondary field.
+    timed = [r for r in runs if session_minutes(r) is not None]
+    if not timed:
+        st.caption("No finished runs yet.")
         return
     df = pd.DataFrame(
         {
-            "Run": [issue_ref(r) for r in billable],
+            "Run": [issue_ref(r) for r in timed],
             # Untruncated name for the hover tooltip; the y-axis label uses
             # the truncated Run value.
-            "Full": [issue_ref(r, limit=None) for r in billable],
-            "ACUs": [r["acus"] for r in billable],
-            "at_cap": [
-                bool(cap is not None and r["acus"] >= cap) for r in billable
-            ],
+            "Full": [issue_ref(r, limit=None) for r in timed],
+            "Minutes": [session_minutes(r) for r in timed],
+            "ACUs": [acu_display(r) for r in timed],
         }
     )
     # Horizontal bars: run names read left-to-right on the y axis, so they
     # stay legible instead of truncating like rotated x-axis labels. Vega-Lite
     # axis labels can't carry tooltips; hovering a bar shows the full name.
-    # Highest spend at the top.
-    by_acus = sorted(billable, key=lambda r: r["acus"], reverse=True)
-    y = alt.Y(
-        "Run:N",
-        sort=[issue_ref(r) for r in by_acus],
-        title=None,
-        axis=alt.Axis(labelLimit=340, labelOverlap=False),
-    )
-    base = alt.Chart(df).mark_bar().encode(
-        x=alt.X("ACUs:Q", title="ACUs"),
-        y=y,
-        tooltip=[alt.Tooltip("Full:N", title="Run"), "ACUs"],
-    )
-    layers = [base]
-    chart_height = max(160, 26 * len(billable))
-    if cap is not None:
-        layers.append(
-            alt.Chart(df)
-            .mark_bar(color="orange")
-            .transform_filter(alt.datum.at_cap == True)  # noqa: E712
-            .encode(
-                x=alt.X("ACUs:Q"),
-                y=y,
-                tooltip=[alt.Tooltip("Full:N", title="Run"), "ACUs"],
-            )
+    # Longest sessions at the top.
+    by_minutes = sorted(timed, key=session_minutes, reverse=True)
+    chart = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Minutes:Q", title="Session minutes"),
+            y=alt.Y(
+                "Run:N",
+                sort=[issue_ref(r) for r in by_minutes],
+                title=None,
+                axis=alt.Axis(labelLimit=340, labelOverlap=False),
+            ),
+            tooltip=[
+                alt.Tooltip("Full:N", title="Run"),
+                alt.Tooltip("Minutes:Q", format=".1f"),
+                "ACUs",
+            ],
         )
-        # Fixed color so the cap line and its label read on both light and
-        # dark Streamlit themes; the theme's default rule color does not.
-        # The label sits inside the bottom-left of the line: bars are sorted
-        # longest-first, so the bottom row has the most open space next to
-        # the cap. The cap layers reuse the "ACUs" title so the shared x
-        # axis keeps its name instead of merging to "ACUs, cap".
-        cap_df = pd.DataFrame({"cap": [cap]})
-        layers.append(
-            alt.Chart(cap_df)
-            .mark_rule(strokeDash=[6, 4], color="#E45756")
-            .encode(x=alt.X("cap:Q", title="ACUs"))
-        )
-        layers.append(
-            alt.Chart(cap_df)
-            .mark_text(
-                text=f"cap ({cap:g})",
-                align="right",
-                dx=-6,
-                baseline="bottom",
-                color="#E45756",
-            )
-            .encode(
-                x=alt.X("cap:Q", title="ACUs"),
-                y=alt.value(chart_height - 8),
-            )
-        )
-    st.altair_chart(
-        alt.layer(*layers).properties(height=chart_height),
-        width="stretch",
+        .properties(height=max(160, 26 * len(timed)))
     )
-    if cap is not None:
-        if runs_at_cap:
-            st.caption(
-                f"{runs_at_cap} run(s) hit the MAX_ACU_PER_SESSION cap "
-                f"({cap}) — highlighted in orange."
-            )
-        else:
-            st.caption(f"No runs have hit the MAX_ACU_PER_SESSION cap ({cap}).")
+    st.altair_chart(chart, width="stretch")
+
+    reported = sum(1 for r in timed if (r.get("acus") or 0) > 0)
+    st.caption(
+        f"ACUs reported for {reported}/{len(timed)} finished runs; "
+        "unreported usage shows 'pending'."
+    )
 
 
 # ---------------------------------------------------------------------------
