@@ -1,2 +1,20 @@
 [client]
-toolbarMode = "minimal"
+# "viewer" hides the developer options: Deploy button, rerun, clear cache.
+toolbarMode = "viewer"
+
+[theme]
+# rem = 15px puts the canvas dataframe grid (0.875rem header and cells) at
+# ~13px; DOM text is pinned to 13px/20px by the type system in app.py.
+baseFontSize = 15
+# One LARGE size for every heading: page title, section titles, dialog title.
+headingFontSizes = "20px"
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+
+# Both variants defined so the app's "Auto" mode can follow the OS
+# light/dark preference. They inherit the font options above; colors stay
+# at each mode's defaults for native contrast.
+[theme.light]
+linkUnderline = false
+
+[theme.dark]
+linkUnderline = false
