@@ -41,6 +41,7 @@ OUTCOME_LABELS = {
     "fixed": "Fixed",
     "needs_human": "Needs human",
     "not_reproducible": "Not reproducible",
+    "failed": "Failed",
 }
 
 TERMINAL_STATES = {"merged", "needs_human", "failed"}
@@ -744,7 +745,9 @@ def render_trends(metrics, runs):
         else:
             outcome_counts = {}
             for r in finished:
-                label = outcome_label(r.get("outcome"))
+                # Runs that failed before producing a report have no
+                # outcome; their state is the honest label.
+                label = outcome_label(r.get("outcome") or r.get("state"))
                 outcome_counts[label] = outcome_counts.get(label, 0) + 1
             df = pd.DataFrame(
                 [
