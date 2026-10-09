@@ -822,7 +822,10 @@ def render_overview(metrics, runs):
 
 
 def render_trends(metrics, runs):
-    left, right = st.columns(2)
+    # Keyed container so the two charts stack via CSS instead of squeezing
+    # or overflowing at narrow widths.
+    with st.container(key="trends_split"):
+        left, right = st.columns(2)
 
     with left:
         section_title("Completed over time")
@@ -1077,20 +1080,21 @@ code{font-family:inherit!important;}
    labels carry their own top spacing so they never collide with values
    from a wrapped row above. */
 .kpi-group{font-weight:600;margin-top:16px;}
-.st-key-kpi_grid [data-testid="stHorizontalBlock"]{flex-wrap:wrap;}
-@media (max-width:1240px){
-.st-key-kpi_grid [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 40%!important;min-width:230px;}
-}
-@media (max-width:560px){
-.st-key-kpi_grid [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 100%!important;}
-}
-/* Two-tile inner groups wrap rather than squeeze. */
-.st-key-kpi_grid [data-testid="stColumn"] [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{min-width:110px;}
 
-/* Overview: table + sidebar stack once the split would squeeze the grid. */
-@media (max-width:1240px){
-.st-key-overview_split [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 100%!important;min-width:0;}
-}
+/* Columns wrap when they can't fit, instead of enforcing their default
+   min-width and pushing the whole page wider than the viewport. The
+   flex-basis (not a media query) decides when wrapping happens. */
+.st-key-kpi_grid [data-testid="stHorizontalBlock"],
+.st-key-overview_split [data-testid="stHorizontalBlock"],
+.st-key-trends_split [data-testid="stHorizontalBlock"]{flex-wrap:wrap;}
+.st-key-kpi_grid [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 230px!important;min-width:230px!important;}
+/* Two-tile inner groups wrap rather than squeeze. */
+.st-key-kpi_grid [data-testid="stColumn"] [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 110px!important;min-width:110px!important;}
+/* Overview: table keeps ~60% while it fits, sidebar wraps below it. */
+.st-key-overview_split [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]:first-child{flex:7 1 560px!important;min-width:520px!important;}
+.st-key-overview_split [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]:last-child{flex:4 1 300px!important;min-width:260px!important;}
+/* Trends: the two charts side by side, stacked when space runs out. */
+.st-key-trends_split [data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 420px!important;min-width:300px!important;}
 
 .kpi-label{color:var(--text-color);color:color-mix(in srgb,var(--text-color) 60%,transparent);display:flex;align-items:center;gap:6px;}
 .kpi-help{position:relative;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;color:var(--text-color);color:color-mix(in srgb,var(--text-color) 55%,transparent);cursor:help;}
