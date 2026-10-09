@@ -144,7 +144,11 @@ class AutopilotService:
             # issue poller would retry it forever.
             logger.exception("failed to create session for issue #%s", issue_number)
             self._store.update(
-                run["id"], state="failed", error=str(exc), finished_at=_now()
+                run["id"],
+                state="failed",
+                outcome="failed",
+                error=str(exc),
+                finished_at=_now(),
             )
             self._store.add_event(run["id"], "error", str(exc))
             await self._gh_write(
@@ -200,6 +204,7 @@ class AutopilotService:
                     self._store.update(
                         run["id"],
                         state="failed",
+                        outcome="failed",
                         error=error,
                         finished_at=_now(),
                     )
@@ -416,7 +421,6 @@ def compute_metrics(runs, settings) -> dict:
         "simulate": settings.simulate,
         "repo": settings.github_repo,
         "max_acu_per_session": settings.max_acu_per_session,
-        "acu_price_usd": settings.acu_price_usd,
         # Funnel counts distinct issues at every stage: an issue remediated
         # twice still counts once, keeping the funnel monotonic. Retries
         # still show up in ACU totals.
