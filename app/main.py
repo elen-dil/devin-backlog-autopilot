@@ -1,12 +1,10 @@
-"""FastAPI entrypoint: webhook, observability endpoints, background loops."""
+"""FastAPI entrypoint: observability endpoints and background loops."""
 
 import asyncio
-import hashlib
-import hmac
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from .config import Settings
@@ -16,11 +14,6 @@ from .service import AutopilotService, compute_metrics
 from .store import RunStore
 
 logger = logging.getLogger("autopilot")
-
-
-def _verify_signature(secret: str, body: bytes, header: str) -> bool:
-    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(header, expected)
 
 
 async def _loop(tick, seconds: int) -> None:
@@ -72,7 +65,8 @@ def create_app(
                 ),
             ]
             if not settings.simulate:
-                # The webhook is the primary trigger; this is the fallback.
+                # Polling labeled issues is the only ingress; simulate mode
+                # injects issues via POST /simulate/issue instead.
                 tasks.append(
                     asyncio.create_task(
                         _loop(service.issue_poll_tick, settings.issue_poll_seconds)
@@ -84,35 +78,6 @@ def create_app(
 
     app = FastAPI(title="devin-backlog-autopilot", lifespan=lifespan)
     app.state.service = service
-
-    @app.post("/webhooks/github")
-    async def github_webhook(request: Request):
-        body = await request.body()
-        if settings.github_webhook_secret:
-            signature = request.headers.get("x-hub-signature-256", "")
-            if not _verify_signature(settings.github_webhook_secret, body, signature):
-                raise HTTPException(status_code=401, detail="bad signature")
-
-        event = request.headers.get("x-github-event", "")
-        if event == "ping":
-            return {"result": "pong"}
-        if event == "issues":
-            payload = await request.json()
-            issue = payload.get("issue", {})
-            if (
-                payload.get("action") == "labeled"
-                and payload.get("label", {}).get("name") == settings.trigger_label
-                and issue.get("state") == "open"
-            ):
-                result = await service.enqueue_issue(
-                    issue["number"],
-                    issue["title"],
-                    issue["html_url"],
-                    issue.get("body") or "",
-                    source="webhook",
-                )
-                return {"result": result}
-        return {"result": "ignored"}
 
     @app.get("/api/v1/runs")
     async def list_runs():

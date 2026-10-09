@@ -23,7 +23,6 @@ def settings(tmp_path):
         devin_org_id="",
         github_token="",
         github_repo="elen-dil/superset-ali",
-        github_webhook_secret="test-secret",
         trigger_label="devin-remediate",
         running_label="devin-running",
         pr_open_label="devin-pr-open",

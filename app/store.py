@@ -2,8 +2,8 @@
 
 The `runs` table is the queue: enqueued issues persist their title/body/url
 here, so a restart loses nothing. A partial unique index enforces
-"one active run per issue" at the database level, which keeps the webhook
-and the fallback poller from double-dispatching the same issue. Once a run
+"one active run per issue" at the database level, which keeps repeated
+poller ticks from double-dispatching the same issue. Once a run
 leaves an active state, the issue can be re-triggered by re-applying the
 trigger label.
 """

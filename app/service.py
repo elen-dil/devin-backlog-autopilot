@@ -97,7 +97,7 @@ class AutopilotService:
             self._store.add_event(run_id, "status_change", observed)
 
     async def issue_poll_tick(self) -> None:
-        """Fallback trigger: adopt open issues carrying the trigger label."""
+        """Adopt open issues carrying the trigger label."""
         issues = await self._github.list_labeled_issues(self._s.trigger_label)
         for issue in issues:
             await self.enqueue_issue(

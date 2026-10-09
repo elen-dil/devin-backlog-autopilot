@@ -1,18 +1,13 @@
 import asyncio
 import dataclasses
-import hashlib
-import hmac
-import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.service import compute_metrics
+from app.service import AutopilotService, compute_metrics
 from app.store import RunStore
-
-SECRET = "test-secret"
 
 BASE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -23,10 +18,6 @@ def run(coro):
 
 def _ts(minutes: float) -> str:
     return (BASE + timedelta(minutes=minutes)).isoformat()
-
-
-def _sign(body: bytes) -> str:
-    return "sha256=" + hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
 
 
 def _client(settings, components):
@@ -147,34 +138,27 @@ def test_run_detail_and_events_endpoints(settings, components):
     assert client.get("/api/v1/runs/9999/events").status_code == 404
 
 
-def test_queued_event_records_webhook_source(settings, components):
+def test_queued_event_records_poller_source(settings, components):
     store, devin, _ = components
-    _, client = _client(settings, components)
 
-    body = json.dumps(
-        {
-            "action": "labeled",
-            "label": {"name": "devin-remediate"},
-            "issue": {
-                "number": 42,
-                "title": "Fix the thing",
-                "html_url": "https://github.com/elen-dil/superset-ali/issues/42",
-                "state": "open",
-                "body": "please fix",
-            },
-        }
-    ).encode()
-    resp = client.post(
-        "/webhooks/github",
-        content=body,
-        headers={"x-github-event": "issues", "x-hub-signature-256": _sign(body)},
-    )
-    assert resp.json() == {"result": "queued"}
+    class FakeGitHub:
+        async def list_labeled_issues(self, label):
+            return [
+                {
+                    "number": 42,
+                    "title": "Fix the thing",
+                    "html_url": "https://github.com/elen-dil/superset-ali/issues/42",
+                    "body": "please fix",
+                }
+            ]
+
+    service = AutopilotService(settings, store, devin, FakeGitHub())
+    run(service.issue_poll_tick())
 
     run_id = store.all()[0]["id"]
     first = store.events_for(run_id)[0]
     assert first["event"] == "queued"
-    assert first["detail"] == "source=webhook"
+    assert first["detail"] == "source=poller"
 
 
 def test_metrics_hand_computed(settings, components):
