@@ -786,6 +786,9 @@ def render_cost(metrics, runs):
     df = pd.DataFrame(
         {
             "Run": [issue_ref(r) for r in billable],
+            # Untruncated name for the hover tooltip; the y-axis label uses
+            # the truncated Run value.
+            "Full": [issue_ref(r, limit=None) for r in billable],
             "ACUs": [r["acus"] for r in billable],
             "at_cap": [
                 bool(cap is not None and r["acus"] >= cap) for r in billable
@@ -804,7 +807,9 @@ def render_cost(metrics, runs):
         axis=alt.Axis(labelLimit=340, labelOverlap=False),
     )
     base = alt.Chart(df).mark_bar().encode(
-        x=alt.X("ACUs:Q", title="ACUs"), y=y, tooltip=["Run", "ACUs"]
+        x=alt.X("ACUs:Q", title="ACUs"),
+        y=y,
+        tooltip=[alt.Tooltip("Full:N", title="Run"), "ACUs"],
     )
     layers = [base]
     chart_height = max(160, 26 * len(billable))
@@ -813,7 +818,11 @@ def render_cost(metrics, runs):
             alt.Chart(df)
             .mark_bar(color="orange")
             .transform_filter(alt.datum.at_cap == True)  # noqa: E712
-            .encode(x=alt.X("ACUs:Q"), y=y, tooltip=["Run", "ACUs"])
+            .encode(
+                x=alt.X("ACUs:Q"),
+                y=y,
+                tooltip=[alt.Tooltip("Full:N", title="Run"), "ACUs"],
+            )
         )
         # Fixed color so the cap line and its label read on both light and
         # dark Streamlit themes; the theme's default rule color does not.
@@ -830,7 +839,7 @@ def render_cost(metrics, runs):
         layers.append(
             alt.Chart(cap_df)
             .mark_text(
-                text="cap (MAX_ACU_PER_SESSION)",
+                text=f"cap ({cap:g})",
                 align="right",
                 dx=-6,
                 baseline="bottom",
