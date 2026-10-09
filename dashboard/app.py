@@ -1019,7 +1019,10 @@ def render_cost(metrics, runs):
                 "ACUs",
             ],
         )
-        .properties(height=CHART_HEIGHT)
+        # One row per run needs per-row spacing or labels collide;
+        # CHART_HEIGHT is the floor so it matches the other charts when
+        # few runs exist.
+        .properties(height=max(CHART_HEIGHT, 26 * len(timed)))
     )
     st.altair_chart(chart, width="stretch")
 
