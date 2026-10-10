@@ -449,10 +449,17 @@ HELP_ICON = (
 )
 
 
-def section_title(text):
-    """LARGE heading, used for every section and chart title."""
+def section_title(text, tip=None):
+    """LARGE heading, used for every section and chart title. An optional
+    tip renders the shared help icon with a hover tooltip."""
+    help_span = ""
+    if tip:
+        help_span = (
+            f' <span class="kpi-help" data-tip="{html.escape(tip, quote=True)}">'
+            f"{HELP_ICON}</span>"
+        )
     st.markdown(
-        f'<div class="sec-title">{html.escape(text)}</div>',
+        f'<div class="sec-title">{html.escape(text)}{help_span}</div>',
         unsafe_allow_html=True,
     )
 
@@ -899,7 +906,15 @@ def render_overview(metrics, runs, issues):
         with side_col:
             section_title("Pipeline")
             render_funnel(metrics, runs)
-            section_title("Awaiting decision")
+            section_title(
+                "Awaiting decision",
+                tip=(
+                    "To retry an escalated issue: comment your decision on "
+                    "the issue (requires write access), then re-apply "
+                    "devin-remediate + devin-approved. The new run waives only "
+                    "the rule(s) the last run cited; the label is single-use."
+                ),
+            )
             render_awaiting_decision(issues)
 
 
