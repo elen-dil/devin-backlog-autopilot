@@ -393,19 +393,17 @@ def funnel_counts(metrics, runs):
     funnel = metrics.get("funnel") or {}
     if funnel:
         return [
-            ("Labeled", funnel.get("labeled", 0)),
-            ("Sessions started", funnel.get("sessions_started", 0)),
-            ("PRs opened", funnel.get("prs_opened", 0)),
-            ("Merged", funnel.get("merged", 0)),
-            ("PRs rejected", funnel.get("rejected", 0)),
+            ("Sessions", funnel.get("sessions", 0)),
+            ("PRs", funnel.get("prs", 0)),
+            ("Merged (PRs)", funnel.get("merged", 0)),
+            ("Rejected (PRs)", funnel.get("rejected", 0)),
         ]
     # Older API shape: derive from the runs list.
     return [
-        ("Labeled", metrics.get("total_runs", len(runs))),
-        ("Sessions started", sum(1 for r in runs if r.get("session_id"))),
-        ("PRs opened", sum(1 for r in runs if r.get("pr_url"))),
-        ("Merged", sum(1 for r in runs if r.get("state") == "merged")),
-        ("PRs rejected", sum(1 for r in runs if r.get("state") == "rejected")),
+        ("Sessions", sum(1 for r in runs if r.get("session_id"))),
+        ("PRs", sum(1 for r in runs if r.get("pr_url"))),
+        ("Merged (PRs)", sum(1 for r in runs if r.get("state") == "merged")),
+        ("Rejected (PRs)", sum(1 for r in runs if r.get("state") == "rejected")),
     ]
 
 

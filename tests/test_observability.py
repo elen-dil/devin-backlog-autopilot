@@ -36,6 +36,7 @@ def _insert_run(
     finished=None,
     acus=None,
     pr_url=None,
+    session_id=None,
     is_simulated=False,
 ):
     """Insert a run with fully deterministic timestamps for metric math."""
@@ -51,6 +52,7 @@ def _insert_run(
         finished_at=_ts(finished) if finished is not None else None,
         acus=acus,
         pr_url=pr_url,
+        session_id=session_id,
     )
     return run_id
 
@@ -168,15 +170,18 @@ def test_metrics_hand_computed(settings, components):
     # finished_at - started_at -> latency; created_at - finished_at -> label
     # to result. Cap is settings.max_acu_per_session = 10.
     _insert_run(store, 1, "merged", created=0, started=10, finished=70,
-                acus=4, pr_url="https://x/pull/1")
+                acus=4, pr_url="https://x/pull/1", session_id="s-1")
     _insert_run(store, 2, "pr_open", created=0, started=30, finished=60,
-                acus=10, pr_url="https://x/pull/2")  # at cap
+                acus=10, pr_url="https://x/pull/2", session_id="s-2")  # at cap
     _insert_run(store, 3, "needs_human", created=0, started=20, finished=50,
-                acus=3)
+                acus=3, session_id="s-3")
+    # Run 4 models a dispatch claim whose create_session failed: started_at
+    # is stamped but no session_id exists, so it must NOT count in the
+    # funnel's "sessions" stage.
     _insert_run(store, 4, "failed", created=0, started=40, finished=80, acus=2)
     _insert_run(store, 5, "queued", created=0)
     _insert_run(store, 6, "rejected", created=0, started=50, finished=90,
-                acus=5, pr_url="https://x/pull/6")
+                acus=5, pr_url="https://x/pull/6", session_id="s-6")
 
     m = compute_metrics(store.all(), settings)
     assert set(m) == {
@@ -216,9 +221,8 @@ def test_metrics_hand_computed(settings, components):
     assert m["repo"] == settings.github_repo
     assert m["max_acu_per_session"] == 10
     assert m["funnel"] == {
-        "labeled": 6,
-        "sessions_started": 5,
-        "prs_opened": 3,
+        "sessions": 4,  # issues 1, 2, 3, 6 — not 4 (no session_id) or 5 (queued)
+        "prs": 3,
         "merged": 1,
         "rejected": 1,
     }
@@ -247,17 +251,18 @@ def test_metrics_hand_computed(settings, components):
 def test_funnel_counts_distinct_issues(settings, components):
     """Re-remediated issues count once per funnel stage, keeping it monotonic."""
     store, _, _ = components
-    _insert_run(store, 7, "needs_human", created=0, started=1, finished=2)
+    _insert_run(store, 7, "needs_human", created=0, started=1, finished=2,
+                session_id="s-7a")
     _insert_run(store, 7, "merged", created=3, started=4, finished=5,
-                pr_url="https://x/pull/7")
+                pr_url="https://x/pull/7", session_id="s-7b")
     _insert_run(store, 8, "queued", created=0)
 
     m = compute_metrics(store.all(), settings)
     assert m["total_runs"] == 3
+    # Issue 7's two sessions still count once at the "sessions" stage.
     assert m["funnel"] == {
-        "labeled": 2,
-        "sessions_started": 1,
-        "prs_opened": 1,
+        "sessions": 1,
+        "prs": 1,
         "merged": 1,
         "rejected": 0,
     }
@@ -277,9 +282,8 @@ def test_metrics_endpoint_and_empty_guards(settings, components):
     assert m["acus_per_merged_fix"] is None
     assert m["runs_at_cap"] == 0
     assert m["funnel"] == {
-        "labeled": 0,
-        "sessions_started": 0,
-        "prs_opened": 0,
+        "sessions": 0,
+        "prs": 0,
         "merged": 0,
         "rejected": 0,
     }

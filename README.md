@@ -129,8 +129,8 @@ An always-visible KPI row groups the headline numbers:
 Below the KPIs, three tabs:
 
 - **Overview** — a compact runs table (issue, status, time to result, ACUs,
-  session/PR links) plus a pipeline funnel (labeled -> sessions started -> PRs
-  opened -> merged) and the list of blockers from needs_human runs.
+  session/PR links) plus a pipeline funnel (sessions -> PRs -> merged |
+  rejected) and the list of blockers from needs_human runs.
 - **Trends** — cumulative completed-over-time chart and outcome breakdown.
 - **Cost** — a per-run ACU bar chart with the `MAX_ACU_PER_SESSION` cap as a
   reference line and at-cap runs highlighted.

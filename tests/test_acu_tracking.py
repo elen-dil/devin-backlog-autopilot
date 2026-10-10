@@ -186,6 +186,7 @@ def _metric_run(**kw):
     base = {
         "state": "pr_open",
         "issue_number": 1,
+        "session_id": "s-1",
         "pr_url": "https://x/pr/1",
         "acus": None,
         "created_at": _iso(0),
