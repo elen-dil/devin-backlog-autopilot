@@ -27,6 +27,7 @@ except Exception:
     DISPLAY_TZ_NAME = "UTC"
 
 TS_FORMAT = "%b %d %H:%M:%S %Z"
+DATE_FORMAT = "%b %d"
 
 # Raw enum -> plain-language label. Raw state/outcome names are never shown.
 STATE_LABELS = {
@@ -110,10 +111,10 @@ ACU_HELP = (
 # Dataframe row height is ~35px; header counts as one row.
 TABLE_ROW_HEIGHT = 35
 TABLE_MAX_ROWS = 8
-# Column widths for the runs table (Issue, Status, Time, ACUs, Session,
-# PR, Details). The hover-tooltip script in render_overview() needs the
-# same geometry, so both read these values.
-TABLE_COL_WIDTHS = [300, 110, 75, 70, 75, 55, 75]
+# Column widths for the runs table (Issue, Status, Date, Time, ACUs,
+# Session, PR, Details). The hover-tooltip script in render_overview()
+# needs the same geometry, so both read these values.
+TABLE_COL_WIDTHS = [300, 110, 60, 75, 70, 75, 55, 75]
 
 # Auto-refresh cadence for the dashboard fragment. An invalid or
 # non-positive value falls back to 10s rather than crashing the page.
@@ -153,6 +154,14 @@ def fmt_ts(value):
     if ts is None:
         return "—"
     return ts.astimezone(DISPLAY_TZ).strftime(TS_FORMAT)
+
+
+def fmt_date(value):
+    """Render just the date portion in DISPLAY_TZ, e.g. 'Oct 08'."""
+    ts = parse_ts(value)
+    if ts is None:
+        return "—"
+    return ts.astimezone(DISPLAY_TZ).strftime(DATE_FORMAT)
 
 
 def fmt_delta(start, end):
@@ -645,6 +654,7 @@ def render_runs_table(runs):
                 # truncated cell shows the whole title in the grid tooltip.
                 "Issue": issue_ref(r, limit=None),
                 "Status": state_label(r.get("state")),
+                "Date": fmt_date(r.get("created_at")),
                 # For unfinished runs this column shows elapsed time instead.
                 "Time": fmt_delta(
                     r.get("created_at"), r.get("finished_at") or now
@@ -672,16 +682,17 @@ def render_runs_table(runs):
         column_config={
             "Issue": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[0]),
             "Status": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[1]),
-            "Time": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[2]),
-            "ACUs": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[3]),
+            "Date": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[2]),
+            "Time": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[3]),
+            "ACUs": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[4]),
             "Session": st.column_config.LinkColumn(
-                "Session", display_text="Open", width=TABLE_COL_WIDTHS[4]
+                "Session", display_text="Open", width=TABLE_COL_WIDTHS[5]
             ),
             "PR": st.column_config.LinkColumn(
-                "PR", display_text="Open", width=TABLE_COL_WIDTHS[5]
+                "PR", display_text="Open", width=TABLE_COL_WIDTHS[6]
             ),
             "Details": st.column_config.ButtonColumn(
-                "Details", key="run_detail_click", width=TABLE_COL_WIDTHS[6]
+                "Details", key="run_detail_click", width=TABLE_COL_WIDTHS[7]
             ),
         },
         height=height,
