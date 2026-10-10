@@ -114,6 +114,7 @@ def test_startup_backfill_resolves_closed_pr(settings, components):
 
 def test_rejected_counts_in_metrics(settings):
     base = {
+        "session_id": "s-1",
         "pr_url": PR_URL,
         "acus": 2.0,
         "created_at": "2024-01-01T00:00:00+00:00",
@@ -130,5 +131,7 @@ def test_rejected_counts_in_metrics(settings):
     assert m["pr_rate"] == 1.0  # both finished runs produced a PR
     assert m["merge_rate"] == 0.5  # 1 merged / 2 PRs
     assert m["resolution_rate"] == 0.5  # 1 merged / 2 finished
+    assert m["funnel"]["sessions"] == 2
+    assert m["funnel"]["prs"] == 2
     assert m["funnel"]["rejected"] == 1
     assert m["by_state"]["rejected"] == 1

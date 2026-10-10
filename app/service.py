@@ -549,14 +549,15 @@ def compute_metrics(runs, settings) -> dict:
         "repo": settings.github_repo,
         "max_acu_per_session": settings.max_acu_per_session,
         # Funnel counts distinct issues at every stage: an issue remediated
-        # twice still counts once, keeping the funnel monotonic. Retries
-        # still show up in ACU totals.
+        # twice still counts once per stage. Retries still show up in ACU
+        # totals. "sessions" keys on session_id — a Devin session really
+        # existed — not started_at, which is stamped on dispatch claim
+        # even when create_session fails.
         "funnel": {
-            "labeled": len({r["issue_number"] for r in runs}),
-            "sessions_started": len(
-                {r["issue_number"] for r in runs if r["started_at"]}
+            "sessions": len(
+                {r["issue_number"] for r in runs if r["session_id"]}
             ),
-            "prs_opened": len({r["issue_number"] for r in runs if r["pr_url"]}),
+            "prs": len({r["issue_number"] for r in runs if r["pr_url"]}),
             "merged": len(
                 {r["issue_number"] for r in runs if r["state"] == "merged"}
             ),
