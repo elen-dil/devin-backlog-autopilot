@@ -33,6 +33,13 @@ QUOTA_DETAILS = {
 # finalized runs until the session exits or this window elapses.
 ACU_SETTLE_SECONDS = 30 * 60
 
+# GitHub PR status -> (run state, label setting, run event) for runs
+# leaving pr_open. "open" has no entry: the run keeps waiting.
+_PR_RESOLUTIONS = {
+    "merged": ("merged", "merged_label", "pr_merged"),
+    "closed": ("rejected", "pr_rejected_label", "pr_rejected"),
+}
+
 
 def session_is_terminal(status: str, status_detail) -> bool:
     """Terminal = exit/error/suspended, or running with a finished/waiting detail."""
@@ -385,14 +392,13 @@ class AutopilotService:
             if not run["pr_url"]:
                 continue
             try:
-                status = await self._github.pr_status(run["pr_url"])
-                if status == "open":
-                    continue
-                new_label = (
-                    self._s.merged_label
-                    if status == "merged"
-                    else self._s.pr_rejected_label
+                resolution = _PR_RESOLUTIONS.get(
+                    await self._github.pr_status(run["pr_url"])
                 )
+                if resolution is None:
+                    continue
+                state, label_attr, event = resolution
+                new_label = getattr(self._s, label_attr)
                 # Swap labels BEFORE the state update: a GitHub failure
                 # leaves the run in pr_open so the next tick retries.
                 await self._gh_write(
@@ -409,14 +415,14 @@ class AutopilotService:
                     run["issue_number"],
                     new_label,
                 )
-                if status == "merged":
-                    self._store.update(
-                        run["id"], state="merged", merged_at=_now()
-                    )
-                    self._store.add_event(run["id"], "pr_merged", run["pr_url"])
-                else:
-                    self._store.update(run["id"], state="rejected")
-                    self._store.add_event(run["id"], "pr_rejected", run["pr_url"])
+                fields = {"state": state}
+                # merged_at records when the fix shipped; rejected runs
+                # get no counterpart column — the pr_rejected event
+                # already carries the timestamp.
+                if state == "merged":
+                    fields["merged_at"] = _now()
+                self._store.update(run["id"], **fields)
+                self._store.add_event(run["id"], event, run["pr_url"])
             except Exception:
                 # One poisoned run must not starve the others; the tick
                 # retries it next pass.

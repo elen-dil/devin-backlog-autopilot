@@ -926,17 +926,19 @@ def render_trends(metrics, runs):
             outcome_counts = {}
             outcome_flagged = {}
             for r in finished:
-                # Runs that failed before producing a report have no
-                # outcome; their state is the honest label. Rejected runs
-                # keep outcome="fixed" in the DB, so they key off state too.
+                # Terminal PR states render as themselves: merged means the
+                # fix was applied, and rejected runs keep outcome="fixed" in
+                # the DB. Other finished runs fall back to their reported
+                # outcome, or to state when they failed before producing a
+                # report.
                 raw = (
-                    "rejected"
-                    if r.get("state") == "rejected"
+                    r.get("state")
+                    if r.get("state") in ("merged", "rejected")
                     else (r.get("outcome") or r.get("state"))
                 )
                 label = outcome_label(raw)
                 outcome_counts[label] = outcome_counts.get(label, 0) + 1
-                outcome_flagged[label] = raw != "fixed"
+                outcome_flagged[label] = raw not in ("fixed", "merged")
             df = pd.DataFrame(
                 [
                     {
