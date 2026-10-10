@@ -48,14 +48,19 @@ class GitHubClient:
         )
         resp.raise_for_status()
 
-    async def pr_is_merged(self, pr_url: str) -> bool:
+    async def pr_status(self, pr_url: str) -> str:
         # pr_url looks like https://github.com/{owner}/{repo}/pull/{n}
         parts = pr_url.rstrip("/").split("/")
         owner, repo, number = parts[-4], parts[-3], parts[-1]
         resp = await self._http.get(f"/repos/{owner}/{repo}/pulls/{number}")
         if resp.status_code != 200:
-            return False
-        return bool(resp.json().get("merged_at"))
+            # A failed fetch means "keep waiting", same as the old False:
+            # transient API errors retry on the next tick.
+            return "open"
+        pr = resp.json()
+        if pr.get("merged_at"):
+            return "merged"
+        return "closed" if pr.get("state") == "closed" else "open"
 
 
 class NullGitHubClient:
@@ -63,6 +68,9 @@ class NullGitHubClient:
 
     def __init__(self):
         self.events = []
+        # pr_url -> "open" | "merged" | "closed"; tests set entries to
+        # steer merge_check_tick.
+        self.pr_statuses = {}
 
     async def list_labeled_issues(self, label: str):
         return []
@@ -76,6 +84,6 @@ class NullGitHubClient:
     async def comment(self, issue_number: int, body: str) -> None:
         self.events.append(("comment", issue_number, body))
 
-    async def pr_is_merged(self, pr_url: str) -> bool:
+    async def pr_status(self, pr_url: str) -> str:
         self.events.append(("pr_check", pr_url))
-        return False
+        return self.pr_statuses.get(pr_url, "open")

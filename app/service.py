@@ -377,10 +377,50 @@ class AutopilotService:
                 )
 
     async def merge_check_tick(self) -> None:
-        """Mark pr_open runs as merged once GitHub reports the PR merged."""
+        """Resolve pr_open runs whose PR reached a terminal state on GitHub:
+        merged -> state 'merged', closed-unmerged -> state 'rejected'. Also
+        runs once at startup as a backfill for PRs that transitioned while
+        the service was down."""
         for run in self._store.by_state("pr_open"):
-            if run["pr_url"] and await self._github.pr_is_merged(run["pr_url"]):
-                self._store.update(run["id"], state="merged", merged_at=_now())
+            if not run["pr_url"]:
+                continue
+            try:
+                status = await self._github.pr_status(run["pr_url"])
+                if status == "open":
+                    continue
+                new_label = (
+                    self._s.merged_label
+                    if status == "merged"
+                    else self._s.pr_rejected_label
+                )
+                # Swap labels BEFORE the state update: a GitHub failure
+                # leaves the run in pr_open so the next tick retries.
+                await self._gh_write(
+                    run["id"],
+                    f"remove_label {self._s.pr_open_label}",
+                    self._github.remove_label,
+                    run["issue_number"],
+                    self._s.pr_open_label,
+                )
+                await self._gh_write(
+                    run["id"],
+                    f"add_label {new_label}",
+                    self._github.add_label,
+                    run["issue_number"],
+                    new_label,
+                )
+                if status == "merged":
+                    self._store.update(
+                        run["id"], state="merged", merged_at=_now()
+                    )
+                    self._store.add_event(run["id"], "pr_merged", run["pr_url"])
+                else:
+                    self._store.update(run["id"], state="rejected")
+                    self._store.add_event(run["id"], "pr_rejected", run["pr_url"])
+            except Exception:
+                # One poisoned run must not starve the others; the tick
+                # retries it next pass.
+                logger.exception("merge check failed for run %s", run["id"])
 
     async def acu_backfill_tick(self) -> None:
         """Re-poll recently-finalized sessions for ACU usage. Usage posts to
@@ -388,7 +428,7 @@ class AutopilotService:
         often stale; keep refreshing until the session reports 'exit' (a
         session_ended marker stops further polls) or the settle window ends."""
         finalized = self._store.by_state(
-            "pr_open", "merged", "needs_human", "failed"
+            "pr_open", "merged", "rejected", "needs_human", "failed"
         )
         for run in finalized:
             if not run["session_id"] or not run["finished_at"]:
@@ -457,10 +497,12 @@ def compute_metrics(runs, settings) -> dict:
 
     total = len(runs)
     merged = by_state.get("merged", 0)
-    pr_opened = merged + by_state.get("pr_open", 0)
+    rejected = by_state.get("rejected", 0)
+    pr_opened = merged + by_state.get("pr_open", 0) + rejected
     finished = (
         merged
         + by_state.get("pr_open", 0)
+        + rejected
         + by_state.get("needs_human", 0)
         + by_state.get("failed", 0)
     )
@@ -517,6 +559,9 @@ def compute_metrics(runs, settings) -> dict:
             "prs_opened": len({r["issue_number"] for r in runs if r["pr_url"]}),
             "merged": len(
                 {r["issue_number"] for r in runs if r["state"] == "merged"}
+            ),
+            "rejected": len(
+                {r["issue_number"] for r in runs if r["state"] == "rejected"}
             ),
         },
         "issues_completed": finished,

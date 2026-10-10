@@ -14,7 +14,10 @@ import threading
 from datetime import datetime, timezone
 
 ACTIVE_STATES = ("queued", "running")
-ALL_STATES = ("queued", "running", "pr_open", "merged", "needs_human", "failed")
+ALL_STATES = (
+    "queued", "running", "pr_open", "merged", "rejected",
+    "needs_human", "failed",
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (

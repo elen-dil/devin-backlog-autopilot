@@ -55,6 +55,13 @@ def create_app(
     async def lifespan(app: FastAPI):
         tasks = []
         if run_loops:
+            try:
+                # Backfill: pr_open runs whose PRs were closed or merged while
+                # the service was down resolve immediately instead of waiting
+                # up to MERGE_CHECK_SECONDS for the first scheduled tick.
+                await service.merge_check_tick()
+            except Exception:
+                logger.exception("startup PR status backfill failed")
             tasks = [
                 asyncio.create_task(_loop(service.dispatch_tick, settings.dispatch_seconds)),
                 asyncio.create_task(

@@ -175,6 +175,8 @@ def test_metrics_hand_computed(settings, components):
                 acus=3)
     _insert_run(store, 4, "failed", created=0, started=40, finished=80, acus=2)
     _insert_run(store, 5, "queued", created=0)
+    _insert_run(store, 6, "rejected", created=0, started=50, finished=90,
+                acus=5, pr_url="https://x/pull/6")
 
     m = compute_metrics(store.all(), settings)
     assert set(m) == {
@@ -201,10 +203,11 @@ def test_metrics_hand_computed(settings, components):
         "session_minutes_per_run",
         "session_minutes_per_merged_fix",
     }
-    assert m["total_runs"] == 5
+    assert m["total_runs"] == 6
     assert m["by_state"] == {
         "merged": 1,
         "pr_open": 1,
+        "rejected": 1,
         "needs_human": 1,
         "failed": 1,
         "queued": 1,
@@ -213,30 +216,31 @@ def test_metrics_hand_computed(settings, components):
     assert m["repo"] == settings.github_repo
     assert m["max_acu_per_session"] == 10
     assert m["funnel"] == {
-        "labeled": 5,
-        "sessions_started": 4,
-        "prs_opened": 2,
+        "labeled": 6,
+        "sessions_started": 5,
+        "prs_opened": 3,
         "merged": 1,
+        "rejected": 1,
     }
-    assert m["issues_completed"] == 4
-    assert m["pr_rate"] == 0.5  # 2 PRs / 4 finished
-    assert m["merge_rate"] == 0.5  # 1 merged / 2 PRs
-    assert m["resolution_rate"] == 0.25  # 1 merged / 4 finished
-    # latencies 60, 30, 30, 40 -> median of (30, 40)
-    assert m["median_latency_minutes"] == 35.0
-    # label->result 70, 60, 50, 80 -> median of (60, 70)
-    assert m["median_label_to_result_minutes"] == 65.0
-    # label->pr 70, 60 -> 65
-    assert m["median_label_to_pr_minutes"] == 65.0
-    assert m["total_acus"] == 19
-    assert m["acus_per_run"] == 19 / 4
-    assert m["acus_per_pr"] == 19 / 2
-    assert m["acus_per_merged_fix"] == 19
+    assert m["issues_completed"] == 5
+    assert m["pr_rate"] == 0.6  # 3 PRs / 5 finished
+    assert m["merge_rate"] == 1 / 3  # 1 merged / 3 PRs (rejected counts)
+    assert m["resolution_rate"] == 0.2  # 1 merged / 5 finished
+    # latencies 60, 30, 30, 40, 40 -> median 40
+    assert m["median_latency_minutes"] == 40.0
+    # label->result 70, 60, 50, 80, 90 -> median 70
+    assert m["median_label_to_result_minutes"] == 70.0
+    # label->pr 70, 60, 90 -> 70
+    assert m["median_label_to_pr_minutes"] == 70.0
+    assert m["total_acus"] == 24
+    assert m["acus_per_run"] == 24 / 5
+    assert m["acus_per_pr"] == 24 / 3
+    assert m["acus_per_merged_fix"] == 24
     assert m["acus_pending"] == 0
-    # session minutes 60 + 30 + 30 + 40 across the four finished runs
-    assert m["total_session_minutes"] == 160
+    # session minutes 60 + 30 + 30 + 40 + 40 across the five finished runs
+    assert m["total_session_minutes"] == 200
     assert m["session_minutes_per_run"] == 40
-    assert m["session_minutes_per_merged_fix"] == 160
+    assert m["session_minutes_per_merged_fix"] == 200
     assert m["runs_at_cap"] == 1
 
 
@@ -255,6 +259,7 @@ def test_funnel_counts_distinct_issues(settings, components):
         "sessions_started": 1,
         "prs_opened": 1,
         "merged": 1,
+        "rejected": 0,
     }
 
 
@@ -276,6 +281,7 @@ def test_metrics_endpoint_and_empty_guards(settings, components):
         "sessions_started": 0,
         "prs_opened": 0,
         "merged": 0,
+        "rejected": 0,
     }
 
 
