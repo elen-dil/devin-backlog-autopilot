@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS runs (
     output_json TEXT,
     error TEXT,
     is_simulated INTEGER NOT NULL DEFAULT 0,
+    approved INTEGER NOT NULL DEFAULT 0,
+    rejection_reason TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT
@@ -86,6 +88,21 @@ class RunStore:
                     " WHERE session_id LIKE 'devin-sim-%'"
                 )
                 self._conn.commit()
+            if "approved" not in cols:
+                # approved marks runs dispatched under a devin-approved
+                # waiver; the approver lives on the approval_applied event.
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN"
+                    " approved INTEGER NOT NULL DEFAULT 0"
+                )
+                self._conn.commit()
+            if "rejection_reason" not in cols:
+                # Latest PR comment captured when a PR is found closed;
+                # surfaced as the reason in the issue attempt history.
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN rejection_reason TEXT"
+                )
+                self._conn.commit()
             if "merged_at" in cols:
                 # merged_at was written on merge but read by nothing;
                 # the pr_merged run event records the timestamp now.
@@ -99,19 +116,22 @@ class RunStore:
         issue_url: str,
         issue_body: str,
         is_simulated: bool = False,
+        approved: bool = False,
     ):
         """Insert a queued run. Returns the run id, or None if one is already active."""
         with self._lock:
             try:
                 cur = self._conn.execute(
                     "INSERT INTO runs (issue_number, title, issue_url, issue_body,"
-                    " is_simulated, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    " is_simulated, approved, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         issue_number,
                         title,
                         issue_url,
                         issue_body,
                         1 if is_simulated else 0,
+                        1 if approved else 0,
                         _now(),
                     ),
                 )
@@ -132,6 +152,16 @@ class RunStore:
 
     def get(self, run_id: int):
         row = self._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def latest_finished_for_issue(self, issue_number: int):
+        """Most recent run for the issue that finished (any terminal state
+        or pr_open), used as the 'since' marker for reviewer decisions."""
+        row = self._conn.execute(
+            "SELECT * FROM runs WHERE issue_number = ?"
+            " AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (issue_number,),
+        ).fetchone()
         return dict(row) if row else None
 
     def by_state(self, *states: str):

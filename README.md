@@ -69,6 +69,12 @@ Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs, GET /api/v1/m
 - **Humans merge, always.** Devin opens PRs but never merges. `needs_human`
   (including ACU-cap suspensions and not-reproducible findings) is a first-class
   outcome that leaves a comment explaining why.
+- **Escalations can be waived.** Re-applying `devin-remediate` together with
+  `devin-approved` retries an escalated issue: the service looks for a
+  decision comment by a write-access author posted after the last run
+  finished, bakes it into the prompt as a waiver of the cited escalation
+  rules, and removes `devin-approved` when the run finalizes (single-use).
+  With no qualifying comment the run fails and asks for the decision.
 - **Guardrails.** `MAX_ACU_PER_SESSION` caps spend per issue,
   `MAX_CONCURRENT_SESSIONS` caps parallelism, and a session that fails to start
   gets its trigger label removed so the poller can't loop on it.

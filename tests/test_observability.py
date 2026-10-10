@@ -195,6 +195,7 @@ def test_metrics_hand_computed(settings, components):
         "pr_rate",
         "merge_rate",
         "resolution_rate",
+        "human_intervention_rate",
         "median_latency_minutes",
         "median_label_to_result_minutes",
         "median_label_to_pr_minutes",
@@ -230,6 +231,8 @@ def test_metrics_hand_computed(settings, components):
     assert m["pr_rate"] == 0.6  # 3 PRs / 5 finished
     assert m["merge_rate"] == 1 / 3  # 1 merged / 3 PRs (rejected counts)
     assert m["resolution_rate"] == 0.2  # 1 merged / 5 finished
+    # 1 needs_human + 1 rejected / 5 finished
+    assert m["human_intervention_rate"] == 0.4
     # latencies 60, 30, 30, 40, 40 -> median 40
     assert m["median_latency_minutes"] == 40.0
     # label->result 70, 60, 50, 80, 90 -> median 70

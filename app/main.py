@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from .config import Settings
 from .devin import DevinClient, SimulatedDevinClient
 from .github import GitHubClient, NullGitHubClient
-from .service import AutopilotService, compute_metrics
+from .service import AutopilotService, compute_metrics, issues_index
 from .store import RunStore
 
 logger = logging.getLogger("autopilot")
@@ -101,6 +101,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="run not found")
         return {"run": run}
 
+    @app.get("/api/v1/issues")
+    async def list_issues():
+        return {
+            "issues": issues_index(
+                store.all(include_simulated=settings.simulate),
+                store.events_for,
+            )
+        }
+
     @app.get("/api/v1/runs/{run_id}/events")
     async def run_events(run_id: int):
         if store.get(run_id) is None:
@@ -124,6 +133,7 @@ def create_app(
             title: str
             body: str = ""
             outcome: str | None = None
+            approved: bool = False
 
         @app.post("/simulate/issue")
         async def simulate_issue(issue: SimulatedIssue):
@@ -131,7 +141,12 @@ def create_app(
                 devin.plan_outcome(issue.number, issue.outcome)
             url = f"https://github.com/{settings.github_repo}/issues/{issue.number}"
             result = await service.enqueue_issue(
-                issue.number, issue.title, url, issue.body, source="simulate"
+                issue.number,
+                issue.title,
+                url,
+                issue.body,
+                source="simulate",
+                approved=issue.approved,
             )
             return {"result": result}
 

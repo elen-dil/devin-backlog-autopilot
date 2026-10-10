@@ -29,6 +29,7 @@ def settings(tmp_path):
         merged_label="devin-merged",
         pr_rejected_label="devin-pr-rejected",
         needs_human_label="devin-needs-human",
+        approval_label="devin-approved",
         max_acu_per_session=10,
         max_concurrent_sessions=3,
         session_poll_seconds=30,

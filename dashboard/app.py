@@ -111,10 +111,11 @@ ACU_HELP = (
 # Dataframe row height is ~35px; header counts as one row.
 TABLE_ROW_HEIGHT = 35
 TABLE_MAX_ROWS = 8
-# Column widths for the runs table (Issue, Status, Date, Time, ACUs,
-# Session, PR, Details). The hover-tooltip script in render_overview()
-# needs the same geometry, so both read these values.
-TABLE_COL_WIDTHS = [300, 110, 60, 75, 70, 75, 55, 75]
+# Column widths for the runs table (Issue, Status, Approved, Date,
+# Attempts, Time, ACUs, Session, PR, Details). The hover-tooltip script
+# in render_overview() needs the same geometry, so both read these
+# values.
+TABLE_COL_WIDTHS = [260, 100, 70, 60, 65, 65, 60, 70, 50, 70]
 
 # Auto-refresh cadence for the dashboard fragment. An invalid or
 # non-positive value falls back to 10s rather than crashing the page.
@@ -251,6 +252,8 @@ def friendly_github_write(detail):
         label = op[len("remove_label"):].strip()
         if label == "devin-remediate":
             base = "Removed trigger label"
+        elif label == "devin-approved":
+            base = "Removed approval label"
         elif label:
             base = f"Removed label {label}"
         else:
@@ -261,6 +264,7 @@ def friendly_github_write(detail):
             "session started": "Posted session link comment",
             "result": "Posted result comment",
             "startup failure": "Posted failure comment",
+            "approval needed": "Posted approval-needed comment",
         }.get(context, "Posted comment")
     else:
         base = f"GitHub write: {op}"
@@ -333,6 +337,16 @@ def friendly_event(event):
         if state_m:
             return f"Finished: {state_label(state_m.group(1))}", False
         return f"Finished ({detail or 'no detail'})", False
+
+    if name == "approval_applied":
+        try:
+            info = json.loads(detail or "{}")
+        except ValueError:
+            info = {}
+        text = f"Approved by {info.get('approver') or 'unknown'}"
+        if info.get("decision"):
+            text = f"{text} — {info['decision']}"
+        return text, False
 
     if name == "acus_updated":
         return f"ACU usage updated: {detail or '?'}", False
@@ -513,7 +527,7 @@ def render_kpis(metrics, runs):
 
         with eff_col:
             group_label("Effectiveness")
-            res_col, merge_col = st.columns(2)
+            res_col, merge_col, human_col = st.columns(3)
             res_col.markdown(
                 _kpi_tile(
                     "Resolution rate",
@@ -529,6 +543,16 @@ def render_kpis(metrics, runs):
                     fmt_pct(metrics.get("merge_rate")),
                     "Share of opened PRs that were merged. "
                     "Formula: merged ÷ PRs opened.",
+                ),
+                unsafe_allow_html=True,
+            )
+            human_col.markdown(
+                _kpi_tile(
+                    "Human interventions",
+                    fmt_pct(metrics.get("human_intervention_rate")),
+                    "Share of finished runs that ended waiting on a human "
+                    "decision or with a rejected PR. Formula: (needs human "
+                    "+ rejected runs) ÷ finished runs.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -601,30 +625,36 @@ def render_funnel(metrics, runs):
     st.altair_chart(chart, width="stretch")
 
 
-def render_needs_human(runs):
-    blocked = [r for r in runs if r.get("state") == "needs_human"]
-    if not blocked:
-        st.caption("No runs are waiting on a human.")
+def render_awaiting_decision(issues):
+    waiting = [i for i in issues if i.get("latest_state") == "needs_human"]
+    if not waiting:
+        st.caption("No issues are waiting on a decision.")
         return
-    for r in blocked:
-        report = parse_output(r) or {}
-        blocker = (
+    # Longest-waiting first: sort by when each run finalized, oldest up top.
+    waiting.sort(key=lambda i: i["runs"][-1].get("finished_at") or "")
+    now = datetime.now(DISPLAY_TZ).isoformat()
+    for issue in waiting:
+        run = issue["runs"][-1]
+        report = parse_output(run) or {}
+        rule = (
             report.get("blockers")
-            or r.get("error")
+            or run.get("error")
             or "No blocker detail recorded."
         )
-        url = r.get("issue_url")
-        ref = f"[{issue_ref(r)}]({url})" if url else issue_ref(r)
-        st.markdown(f"- {ref} — {blocker}")
+        url = issue.get("issue_url")
+        ref = f"[{issue_ref(run)}]({url})" if url else issue_ref(run)
+        waited = fmt_delta(run.get("finished_at"), now)
+        st.markdown(f"- {ref} — {rule} · waiting {waited}")
 
 
-def render_runs_table(runs):
-    if not runs:
+def render_runs_table(issues):
+    if not issues:
         st.caption("No runs yet — waiting for issues labeled `devin-remediate`.")
         return
 
     # Attention order: in-flight work first, then blockers, then finished
-    # runs, each group most recent first.
+    # runs, each group most recent first. Rows are issues; each row shows
+    # the issue's latest run.
     state_rank = {
         "running": 0,
         "queued": 1,
@@ -635,7 +665,8 @@ def render_runs_table(runs):
         "merged": 6,
     }
 
-    def sort_key(run):
+    def sort_key(issue):
+        run = issue["runs"][-1]
         ts = (
             parse_ts(run.get("finished_at"))
             or parse_ts(run.get("started_at"))
@@ -644,7 +675,7 @@ def render_runs_table(runs):
         )
         return (state_rank.get(run.get("state"), 9), -ts.timestamp())
 
-    ordered = sorted(runs, key=sort_key)
+    ordered = sorted(issues, key=sort_key)
     now = datetime.now(DISPLAY_TZ).isoformat()
     df = pd.DataFrame(
         [
@@ -652,19 +683,22 @@ def render_runs_table(runs):
                 # Full title in the cell; the grid ellipsizes overflow, so
                 # truncating here too would lose the tail twice. Hovering a
                 # truncated cell shows the whole title in the grid tooltip.
-                "Issue": issue_ref(r, limit=None),
-                "Status": state_label(r.get("state")),
-                "Date": fmt_date(r.get("created_at")),
+                "Issue": issue_ref(latest, limit=None),
+                "Status": state_label(latest.get("state")),
+                "Approved": "Yes" if latest.get("approved") else "",
+                "Date": fmt_date(latest.get("created_at")),
+                "Attempts": issue["attempts"],
                 # For unfinished runs this column shows elapsed time instead.
                 "Time": fmt_delta(
-                    r.get("created_at"), r.get("finished_at") or now
+                    latest.get("created_at"), latest.get("finished_at") or now
                 ),
-                "ACUs": acu_display(r),
-                "Session": r.get("session_url"),
-                "PR": r.get("pr_url"),
+                "ACUs": acu_display(latest),
+                "Session": latest.get("session_url"),
+                "PR": latest.get("pr_url"),
                 "Details": "View",
             }
-            for r in ordered
+            for issue in ordered
+            for latest in [issue["runs"][-1]]
         ]
     )
     # LinkColumn renders NaN/None literally; use empty string for no link.
@@ -682,17 +716,21 @@ def render_runs_table(runs):
         column_config={
             "Issue": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[0]),
             "Status": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[1]),
-            "Date": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[2]),
-            "Time": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[3]),
-            "ACUs": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[4]),
+            "Approved": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[2]),
+            "Date": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[3]),
+            "Attempts": st.column_config.NumberColumn(
+                width=TABLE_COL_WIDTHS[4]
+            ),
+            "Time": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[5]),
+            "ACUs": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[6]),
             "Session": st.column_config.LinkColumn(
-                "Session", display_text="Open", width=TABLE_COL_WIDTHS[5]
+                "Session", display_text="Open", width=TABLE_COL_WIDTHS[7]
             ),
             "PR": st.column_config.LinkColumn(
-                "PR", display_text="Open", width=TABLE_COL_WIDTHS[6]
+                "PR", display_text="Open", width=TABLE_COL_WIDTHS[8]
             ),
             "Details": st.column_config.ButtonColumn(
-                "Details", key="run_detail_click", width=TABLE_COL_WIDTHS[7]
+                "Details", key="run_detail_click", width=TABLE_COL_WIDTHS[9]
             ),
         },
         height=height,
@@ -704,7 +742,7 @@ def render_runs_table(runs):
     # the fragment auto-refresh never reopens a dismissed dialog.
     click = st.session_state.get("run_detail_click")
     if click is not None:
-        run_detail_dialog(ordered[click["row"]])
+        issue_detail_dialog(ordered[click["row"]])
         return
 
     # Row selection also opens the dialog, but only when the selection
@@ -714,76 +752,103 @@ def render_runs_table(runs):
         return
     st.session_state["_selected_row"] = selected
     if selected:
-        run_detail_dialog(ordered[selected[0]])
+        issue_detail_dialog(ordered[selected[0]])
 
 
-@st.dialog("Run details", width="large")
-def run_detail_dialog(run):
-    st.markdown(f"##### {issue_ref(run, limit=None)}")
-
-    links = []
-    if run.get("issue_url"):
-        links.append(f"[Issue]({run['issue_url']})")
-    if run.get("session_url"):
-        links.append(f"[Devin session]({run['session_url']})")
-    if run.get("pr_url"):
-        links.append(f"[Pull request]({run['pr_url']})")
-    st.markdown(" · ".join(links) if links else "No links recorded yet.")
-
-    st.caption(
-        f"Status: {state_label(run.get('state'))} · "
-        f"Outcome: {outcome_label(run.get('outcome'))} · "
-        f"ACUs: {acu_display(run)} · "
-        f"Tests: {tests_text(run)}"
-    )
-    if run.get("error"):
-        st.error(f"Error: {run['error']}")
-
-    report = parse_output(run)
-    section_title("Devin's report")
-    if report is None:
-        st.info("Devin has not posted a structured report for this run yet.")
-    else:
-        st.markdown(f"**Summary:** {report.get('summary') or '—'}")
-        st.markdown(f"**Root cause:** {report.get('root_cause') or '—'}")
-        files = report.get("files_changed") or []
-        if files:
-            st.markdown("**Files changed:**")
-            for path in files:
-                st.markdown(f"- `{path}`")
-        else:
-            st.markdown("**Files changed:** —")
-        st.markdown(
-            f"**Tests:** {report.get('tests_passed') or 0}/{report.get('tests_run') or 0} passed"
-        )
-        st.markdown(f"**Risk notes:** {report.get('risk_notes') or '—'}")
-        st.markdown(f"**Blockers:** {report.get('blockers') or '—'}")
-
-    section_title("Events")
+def approval_detail(event):
+    """Parse the JSON detail of an approval_applied event."""
     try:
-        events = api_get(f"/api/v1/runs/{run['id']}/events").get("events", [])
-    except Exception as exc:
-        st.warning(f"Couldn't load events for this run: {exc}")
-        return
-    if not events:
-        st.caption("No events recorded for this run.")
-        return
-    for e in events:
-        text, is_error = friendly_event(e)
-        marker = "⚠️ " if is_error else ""
-        st.markdown(f"- {fmt_ts(e.get('timestamp'))} — {marker}{text}")
-    with st.expander("Raw event details"):
-        raw = pd.DataFrame(
-            {
-                "Time": [fmt_ts(e.get("timestamp")) for e in events],
-                "Event": [e.get("event") or "—" for e in events],
-                "Detail": [e.get("detail") or "—" for e in events],
-            }
+        return json.loads(event.get("detail") or "{}")
+    except ValueError:
+        return {}
+
+
+def run_reason(run):
+    """Why this attempt ended as it did: rejection comment, escalation
+    rule, or error, whichever applies."""
+    report = parse_output(run) or {}
+    return (
+        run.get("rejection_reason")
+        or report.get("blockers")
+        or run.get("error")
+        or "—"
+    )
+
+
+@st.dialog("Issue details", width="large")
+def issue_detail_dialog(issue):
+    title = issue.get("title") or issue["runs"][-1].get("title") or ""
+    st.markdown(f"##### #{issue['issue_number']} {title}")
+    if issue.get("issue_url"):
+        st.markdown(f"[Issue]({issue['issue_url']})")
+
+    for i, run in enumerate(issue["runs"], 1):
+        section_title(f"Attempt {i} · {state_label(run.get('state'))}")
+        st.caption(
+            f"Outcome: {outcome_label(run.get('outcome'))} · "
+            f"Started: {fmt_ts(run.get('started_at'))} · "
+            f"Finished: {fmt_ts(run.get('finished_at'))} · "
+            f"ACUs: {acu_display(run)} · "
+            f"Tests: {tests_text(run)}"
         )
-        st.dataframe(raw, hide_index=True, width="stretch")
+        links = []
+        if run.get("session_url"):
+            links.append(f"[Devin session]({run['session_url']})")
+        if run.get("pr_url"):
+            links.append(f"[Pull request]({run['pr_url']})")
+        if links:
+            st.markdown(" · ".join(links))
+        st.markdown(f"**Reason:** {run_reason(run)}")
+        if run.get("error"):
+            st.error(f"Error: {run['error']}")
+        for e in run.get("events", []):
+            if e.get("event") != "approval_applied":
+                continue
+            info = approval_detail(e)
+            st.markdown(
+                f"**Approved by {info.get('approver') or 'unknown'}** "
+                f"({fmt_ts(e.get('timestamp'))}): "
+                f"{info.get('decision') or '—'}"
+            )
+        with st.expander("Report & events"):
+            report = parse_output(run)
+            if report is None:
+                st.info(
+                    "Devin has not posted a structured report for this run yet."
+                )
+            else:
+                st.markdown(f"**Summary:** {report.get('summary') or '—'}")
+                st.markdown(
+                    f"**Root cause:** {report.get('root_cause') or '—'}"
+                )
+                files = report.get("files_changed") or []
+                if files:
+                    st.markdown("**Files changed:**")
+                    for path in files:
+                        st.markdown(f"- `{path}`")
+                else:
+                    st.markdown("**Files changed:** —")
+                st.markdown(
+                    f"**Tests:** {report.get('tests_passed') or 0}"
+                    f"/{report.get('tests_run') or 0} passed"
+                )
+                st.markdown(
+                    f"**Risk notes:** {report.get('risk_notes') or '—'}"
+                )
+                st.markdown(f"**Blockers:** {report.get('blockers') or '—'}")
+            events = run.get("events", [])
+            if not events:
+                st.caption("No events recorded for this run.")
+            else:
+                for e in events:
+                    text, is_error = friendly_event(e)
+                    marker = "⚠️ " if is_error else ""
+                    st.markdown(
+                        f"- {fmt_ts(e.get('timestamp'))} — {marker}{text}"
+                    )
 
 
-def render_overview(metrics, runs):
+def render_overview(metrics, runs, issues):
     # Grid cells are canvas, not DOM, so the browser can't tooltip
     # truncated titles. Pointer position maps to (column, row) via the
     # grid's real scroll offsets; the full title comes from the grid's
@@ -830,12 +895,12 @@ def render_overview(metrics, runs):
     with st.container(key="overview_split"):
         table_col, side_col = st.columns([7, 4])
         with table_col:
-            render_runs_table(runs)
+            render_runs_table(issues)
         with side_col:
             section_title("Pipeline")
             render_funnel(metrics, runs)
-            section_title("Needs human")
-            render_needs_human(runs)
+            section_title("Awaiting decision")
+            render_awaiting_decision(issues)
 
 
 def render_trends(metrics, runs):
@@ -1141,6 +1206,7 @@ def render():
         health = api_get("/healthz")
         metrics = api_get("/api/v1/metrics")
         runs = api_get("/api/v1/runs").get("runs", [])
+        issues = api_get("/api/v1/issues").get("issues", [])
     except Exception as exc:
         st.error(
             f"Can't reach the API at {API} ({exc}). "
@@ -1158,7 +1224,7 @@ def render():
     )
     if tab_overview.open:
         with tab_overview:
-            render_overview(metrics, runs)
+            render_overview(metrics, runs, issues)
     if tab_trends.open:
         with tab_trends:
             render_trends(metrics, runs)

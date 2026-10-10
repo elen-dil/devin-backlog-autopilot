@@ -40,6 +40,9 @@ _PR_RESOLUTIONS = {
     "closed": ("rejected", "pr_rejected_label", "pr_rejected"),
 }
 
+# author_association values on issue comments that imply write access.
+REVIEWER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
 
 def session_is_terminal(status: str, status_detail) -> bool:
     """Terminal = exit/error/suspended, or running with a finished/waiting detail."""
@@ -59,6 +62,15 @@ def _older_than(iso_ts: str, seconds: float) -> bool:
     return age.total_seconds() > seconds
 
 
+def _parse_ts(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 class AutopilotService:
     def __init__(self, settings, store, devin, github):
         self._s = settings
@@ -67,10 +79,21 @@ class AutopilotService:
         self._github = github
 
     async def enqueue_issue(
-        self, number: int, title: str, url: str, body: str, source: str
+        self,
+        number: int,
+        title: str,
+        url: str,
+        body: str,
+        source: str,
+        approved: bool = False,
     ) -> str:
         run_id = self._store.enqueue(
-            number, title, url, body or "", is_simulated=self._s.simulate
+            number,
+            title,
+            url,
+            body or "",
+            is_simulated=self._s.simulate,
+            approved=approved,
         )
         if run_id is None:
             logger.info("issue #%s already has an active run; skipping", number)
@@ -124,12 +147,17 @@ class AutopilotService:
         """Adopt open issues carrying the trigger label."""
         issues = await self._github.list_labeled_issues(self._s.trigger_label)
         for issue in issues:
+            labels = {
+                (l.get("name") if isinstance(l, dict) else l)
+                for l in issue.get("labels", [])
+            }
             await self.enqueue_issue(
                 issue["number"],
                 issue["title"],
                 issue["html_url"],
                 issue.get("body") or "",
                 source="poller",
+                approved=self._s.approval_label in labels,
             )
 
     async def dispatch_tick(self) -> None:
@@ -140,13 +168,124 @@ class AutopilotService:
         for run in self._store.oldest_queued(slots):
             await self._start_run(run)
 
+    async def _resolve_approval(self, run: dict):
+        """Reviewer decision for an approved run, or None. The decision is
+        the latest comment by a write-access author posted after the issue's
+        most recent finished run."""
+        issue_number = run["issue_number"]
+        previous = self._store.latest_finished_for_issue(issue_number)
+        since = _parse_ts(previous["finished_at"]) if previous else None
+        comments = await self._github.list_issue_comments(issue_number)
+        epoch = datetime.min.replace(tzinfo=timezone.utc)
+        decisions = [
+            c
+            for c in comments
+            if c.get("author_association") in REVIEWER_ASSOCIATIONS
+            and (
+                since is None
+                or (_parse_ts(c.get("created_at")) or epoch) > since
+            )
+        ]
+        if not decisions:
+            return None
+        previous_output = None
+        if previous and previous.get("output_json"):
+            try:
+                previous_output = json.loads(previous["output_json"])
+            except ValueError:
+                previous_output = None
+        return {
+            "decision": decisions[-1].get("body") or "",
+            "approver": await self._approval_actor(issue_number, decisions[-1]),
+            "previous_output": previous_output,
+        }
+
+    async def _approval_actor(self, issue_number: int, decision_comment):
+        """Login of whoever applied the approval label; the decision
+        comment's author is the fallback when no label event is found."""
+        try:
+            events = await self._github.list_issue_events(issue_number)
+        except Exception:
+            events = []
+        for e in reversed(events):
+            if (
+                e.get("event") == "labeled"
+                and (e.get("label") or {}).get("name") == self._s.approval_label
+            ):
+                return (e.get("actor") or {}).get("login")
+        return (decision_comment.get("user") or {}).get("login")
+
+    async def _fail_without_decision(self, run: dict) -> None:
+        """devin-approved with no reviewer comment: fail the run, ask for
+        the decision, and strip both labels so the poller can't loop."""
+        issue_number = run["issue_number"]
+        error = f"{self._s.approval_label} set but no reviewer decision found"
+        self._store.update(
+            run["id"],
+            state="failed",
+            outcome="failed",
+            error=error,
+            finished_at=_now(),
+        )
+        self._store.add_event(run["id"], "error", error)
+        await self._gh_write(
+            run["id"],
+            f"remove_label {self._s.trigger_label}",
+            self._github.remove_label,
+            issue_number,
+            self._s.trigger_label,
+        )
+        await self._gh_write(
+            run["id"],
+            f"remove_label {self._s.approval_label}",
+            self._github.remove_label,
+            issue_number,
+            self._s.approval_label,
+        )
+        await self._gh_write(
+            run["id"],
+            "comment approval needed",
+            self._github.comment,
+            issue_number,
+            f"Autopilot: `{self._s.approval_label}` is set, but no reviewer "
+            "decision was found. A maintainer with write access must post a "
+            "comment stating the decision, then re-apply "
+            f"`{self._s.trigger_label}` and `{self._s.approval_label}`.",
+        )
+
     async def _start_run(self, run: dict) -> None:
         issue_number = run["issue_number"]
+        approval = None
+        if run.get("approved"):
+            try:
+                approval = await self._resolve_approval(run)
+            except Exception:
+                # Transient GitHub failure: keep the run queued so the
+                # next dispatch tick retries rather than failing spuriously.
+                logger.exception(
+                    "approval check failed for run %s; retrying next tick",
+                    run["id"],
+                )
+                return
+            if approval is None:
+                await self._fail_without_decision(run)
+                return
         # Claim the run before the async call: if the process dies between
         # create_session and writing the session_id, the stale-claim sweep in
         # session_poll_tick fails the run instead of re-dispatching it and
         # spawning a second (orphaned) session for the same issue.
         self._store.update(run["id"], state="running", started_at=_now())
+        if approval is not None:
+            self._store.add_event(
+                run["id"],
+                "approval_applied",
+                json.dumps(
+                    {
+                        "approver": approval["approver"],
+                        "decision": approval["decision"],
+                    }
+                ),
+            )
         try:
             session = await self._devin.create_session(
                 prompt=build_prompt(
@@ -156,6 +295,7 @@ class AutopilotService:
                     body=run["issue_body"],
                     repo=self._s.github_repo,
                     needs_human_label=self._s.needs_human_label,
+                    approval=approval,
                 ),
                 title=f"autopilot: issue #{issue_number}",
                 repos=[self._s.github_repo],
@@ -182,6 +322,14 @@ class AutopilotService:
                 issue_number,
                 self._s.trigger_label,
             )
+            if run.get("approved"):
+                await self._gh_write(
+                    run["id"],
+                    f"remove_label {self._s.approval_label}",
+                    self._github.remove_label,
+                    issue_number,
+                    self._s.approval_label,
+                )
             await self._gh_write(
                 run["id"],
                 "comment startup failure",
@@ -319,6 +467,15 @@ class AutopilotService:
             issue_number,
             self._s.running_label,
         )
+        if run.get("approved"):
+            # devin-approved is single-use: consumed by this run.
+            await self._gh_write(
+                run["id"],
+                f"remove_label {self._s.approval_label}",
+                self._github.remove_label,
+                issue_number,
+                self._s.approval_label,
+            )
 
         stored_outcome = outcome or ("failed" if state == "failed" else None)
         self._store.update(
@@ -399,6 +556,13 @@ class AutopilotService:
                     continue
                 state, label_attr, event = resolution
                 new_label = getattr(self._s, label_attr)
+                # Capture the reason before mutating anything: a fetch
+                # failure leaves the run untouched for the next tick.
+                rejection_reason = None
+                if state == "rejected":
+                    rejection_reason = await self._github.latest_pr_comment(
+                        run["pr_url"]
+                    )
                 # Swap labels BEFORE the state update: a GitHub failure
                 # leaves the run in pr_open so the next tick retries.
                 await self._gh_write(
@@ -415,7 +579,9 @@ class AutopilotService:
                     run["issue_number"],
                     new_label,
                 )
-                self._store.update(run["id"], state=state)
+                self._store.update(
+                    run["id"], state=state, rejection_reason=rejection_reason
+                )
                 self._store.add_event(run["id"], event, run["pr_url"])
             except Exception:
                 # One poisoned run must not starve the others; the tick
@@ -572,6 +738,13 @@ def compute_metrics(runs, settings) -> dict:
         "merge_rate": merged / pr_opened if pr_opened else 0.0,
         # resolution_rate: of finished runs, how many shipped a merged fix.
         "resolution_rate": merged / finished if finished else 0.0,
+        # human_intervention_rate: of finished runs, how many ended waiting
+        # on a human decision or with a rejected PR.
+        "human_intervention_rate": (
+            (by_state.get("needs_human", 0) + rejected) / finished
+            if finished
+            else 0.0
+        ),
         "median_latency_minutes": median_latency,
         "median_label_to_result_minutes": median_label_to_result,
         "median_label_to_pr_minutes": median_label_to_pr,
@@ -595,3 +768,37 @@ def compute_metrics(runs, settings) -> dict:
             (total_session_minutes / merged) if merged else None
         ),
     }
+
+
+def issues_index(runs, events_for) -> list:
+    """Per-issue aggregates for the dashboard: latest state, attempt
+    count, and each run's parsed output plus event log, oldest first.
+    Ordered by most recent activity (latest run id) descending."""
+    by_issue = {}
+    for run in runs:
+        by_issue.setdefault(run["issue_number"], []).append(run)
+    issues = []
+    for number, issue_runs in by_issue.items():
+        ordered = sorted(issue_runs, key=lambda r: r["id"])
+        latest = ordered[-1]
+        entries = []
+        for r in ordered:
+            output = None
+            if r.get("output_json"):
+                try:
+                    output = json.loads(r["output_json"])
+                except ValueError:
+                    output = None
+            entries.append({**r, "output": output, "events": events_for(r["id"])})
+        issues.append(
+            {
+                "issue_number": number,
+                "title": latest["title"],
+                "issue_url": latest["issue_url"],
+                "latest_state": latest["state"],
+                "attempts": len(ordered),
+                "runs": entries,
+            }
+        )
+    issues.sort(key=lambda i: i["runs"][-1]["id"], reverse=True)
+    return issues

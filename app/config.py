@@ -25,6 +25,7 @@ class Settings:
     merged_label: str
     pr_rejected_label: str
     needs_human_label: str
+    approval_label: str
     max_acu_per_session: int
     max_concurrent_sessions: int
     session_poll_seconds: int
@@ -48,6 +49,7 @@ class Settings:
             merged_label=os.environ.get("MERGED_LABEL", "devin-merged"),
             pr_rejected_label=os.environ.get("PR_REJECTED_LABEL", "devin-pr-rejected"),
             needs_human_label=os.environ.get("NEEDS_HUMAN_LABEL", "devin-needs-human"),
+            approval_label=os.environ.get("APPROVAL_LABEL", "devin-approved"),
             max_acu_per_session=_int("MAX_ACU_PER_SESSION", 10),
             max_concurrent_sessions=_int("MAX_CONCURRENT_SESSIONS", 3),
             session_poll_seconds=_int("SESSION_POLL_SECONDS", 30),

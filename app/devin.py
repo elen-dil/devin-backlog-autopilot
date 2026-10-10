@@ -153,6 +153,8 @@ class SimulatedDevinClient:
         self._sessions = {}
         self._planned_outcomes = {}
         self.terminated = []
+        # Every prompt passed to create_session, for test assertions.
+        self.prompts = []
 
     def plan_outcome(self, issue_number: int, outcome: str) -> None:
         self._planned_outcomes[issue_number] = outcome
@@ -167,6 +169,7 @@ class SimulatedDevinClient:
         max_acu_limit: int,
         structured_output_schema: dict,
     ):
+        self.prompts.append(prompt)
         session_id = f"devin-sim-{uuid.uuid4().hex[:8]}"
         issue_number = int(
             next(t.split("-", 1)[1] for t in tags if t.startswith("issue-"))
