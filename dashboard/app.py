@@ -34,18 +34,20 @@ STATE_LABELS = {
     "running": "Running",
     "pr_open": "Awaiting merge",
     "merged": "Merged",
+    "rejected": "PR rejected",
     "needs_human": "Needs human",
     "failed": "Failed",
 }
 STATE_ORDER = list(STATE_LABELS)
 OUTCOME_LABELS = {
     "fixed": "Fix proposed",
+    "rejected": "PR rejected",
     "needs_human": "Needs human",
     "not_reproducible": "Not reproducible",
     "failed": "Failed",
 }
 
-TERMINAL_STATES = {"merged", "needs_human", "failed"}
+TERMINAL_STATES = {"merged", "rejected", "needs_human", "failed"}
 
 # ---------------------------------------------------------------------------
 # Design system: exactly two font sizes and one accent, shared by the CSS
@@ -395,6 +397,7 @@ def funnel_counts(metrics, runs):
             ("Sessions started", funnel.get("sessions_started", 0)),
             ("PRs opened", funnel.get("prs_opened", 0)),
             ("Merged", funnel.get("merged", 0)),
+            ("PRs rejected", funnel.get("rejected", 0)),
         ]
     # Older API shape: derive from the runs list.
     return [
@@ -402,6 +405,7 @@ def funnel_counts(metrics, runs):
         ("Sessions started", sum(1 for r in runs if r.get("session_id"))),
         ("PRs opened", sum(1 for r in runs if r.get("pr_url"))),
         ("Merged", sum(1 for r in runs if r.get("state") == "merged")),
+        ("PRs rejected", sum(1 for r in runs if r.get("state") == "rejected")),
     ]
 
 
@@ -620,7 +624,8 @@ def render_runs_table(runs):
         "needs_human": 2,
         "pr_open": 3,
         "failed": 4,
-        "merged": 5,
+        "rejected": 5,
+        "merged": 6,
     }
 
     def sort_key(run):
@@ -921,12 +926,19 @@ def render_trends(metrics, runs):
             outcome_counts = {}
             outcome_flagged = {}
             for r in finished:
-                # Runs that failed before producing a report have no
-                # outcome; their state is the honest label.
-                raw = r.get("outcome") or r.get("state")
+                # Terminal PR states render as themselves: merged means the
+                # fix was applied, and rejected runs keep outcome="fixed" in
+                # the DB. Other finished runs fall back to their reported
+                # outcome, or to state when they failed before producing a
+                # report.
+                raw = (
+                    r.get("state")
+                    if r.get("state") in ("merged", "rejected")
+                    else (r.get("outcome") or r.get("state"))
+                )
                 label = outcome_label(raw)
                 outcome_counts[label] = outcome_counts.get(label, 0) + 1
-                outcome_flagged[label] = raw != "fixed"
+                outcome_flagged[label] = raw not in ("fixed", "merged")
             df = pd.DataFrame(
                 [
                     {

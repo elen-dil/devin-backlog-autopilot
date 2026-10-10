@@ -22,6 +22,8 @@ class Settings:
     trigger_label: str
     running_label: str
     pr_open_label: str
+    merged_label: str
+    pr_rejected_label: str
     needs_human_label: str
     max_acu_per_session: int
     max_concurrent_sessions: int
@@ -43,6 +45,8 @@ class Settings:
             trigger_label=os.environ.get("TRIGGER_LABEL", "devin-remediate"),
             running_label=os.environ.get("RUNNING_LABEL", "devin-running"),
             pr_open_label=os.environ.get("PR_OPEN_LABEL", "devin-pr-open"),
+            merged_label=os.environ.get("MERGED_LABEL", "devin-merged"),
+            pr_rejected_label=os.environ.get("PR_REJECTED_LABEL", "devin-pr-rejected"),
             needs_human_label=os.environ.get("NEEDS_HUMAN_LABEL", "devin-needs-human"),
             max_acu_per_session=_int("MAX_ACU_PER_SESSION", 10),
             max_concurrent_sessions=_int("MAX_CONCURRENT_SESSIONS", 3),

@@ -17,7 +17,8 @@ opens a PR, while a small dashboard tracks throughput, success rates, and cost.
                           ▼
                     SQLite `runs`  (the queue;
                     queued | running | pr_open |
-                    merged | needs_human | failed)
+                    merged | rejected |
+                    needs_human | failed)
                                               │
                         dispatcher (MAX_CONCURRENT_SESSIONS=3)
                                               │
@@ -40,7 +41,8 @@ opens a PR, while a small dashboard tracks throughput, success rates, and cost.
         devin-pr-open    devin-needs-human             trigger label removed
               │
               ▼
-     merge check every 5 min ──▶ state: merged
+     merge check every 5 min ──▶ state: merged (label: devin-merged)
+                                   or rejected (label: devin-pr-rejected)
 
 Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs, GET /api/v1/metrics
 ```

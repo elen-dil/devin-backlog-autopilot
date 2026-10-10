@@ -26,6 +26,8 @@ def settings(tmp_path):
         trigger_label="devin-remediate",
         running_label="devin-running",
         pr_open_label="devin-pr-open",
+        merged_label="devin-merged",
+        pr_rejected_label="devin-pr-rejected",
         needs_human_label="devin-needs-human",
         max_acu_per_session=10,
         max_concurrent_sessions=3,
