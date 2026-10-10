@@ -373,6 +373,13 @@ def test_is_simulated_backfill_on_pre_migration_db(tmp_path):
     assert rows[1]["is_simulated"] == 1
     assert rows[2]["is_simulated"] == 0
 
+    # The dropped merged_at column is removed on open too.
+    cols = {
+        row["name"]
+        for row in store._conn.execute("PRAGMA table_info(runs)").fetchall()
+    }
+    assert "merged_at" not in cols
+
     # Re-opening is idempotent: the column now exists, so no migration runs.
     assert RunStore(path).get(1)["is_simulated"] == 1
     assert RunStore(path).get(2)["is_simulated"] == 0

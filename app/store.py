@@ -40,8 +40,7 @@ CREATE TABLE IF NOT EXISTS runs (
     is_simulated INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     started_at TEXT,
-    finished_at TEXT,
-    merged_at TEXT
+    finished_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_issue
     ON runs (issue_number) WHERE state IN ('queued', 'running');
@@ -86,6 +85,11 @@ class RunStore:
                     "UPDATE runs SET is_simulated = 1"
                     " WHERE session_id LIKE 'devin-sim-%'"
                 )
+                self._conn.commit()
+            if "merged_at" in cols:
+                # merged_at was written on merge but read by nothing;
+                # the pr_merged run event records the timestamp now.
+                self._conn.execute("ALTER TABLE runs DROP COLUMN merged_at")
                 self._conn.commit()
 
     def enqueue(

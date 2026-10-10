@@ -415,13 +415,7 @@ class AutopilotService:
                     run["issue_number"],
                     new_label,
                 )
-                fields = {"state": state}
-                # merged_at records when the fix shipped; rejected runs
-                # get no counterpart column — the pr_rejected event
-                # already carries the timestamp.
-                if state == "merged":
-                    fields["merged_at"] = _now()
-                self._store.update(run["id"], **fields)
+                self._store.update(run["id"], state=state)
                 self._store.add_event(run["id"], event, run["pr_url"])
             except Exception:
                 # One poisoned run must not starve the others; the tick

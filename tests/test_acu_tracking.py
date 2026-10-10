@@ -191,7 +191,6 @@ def _metric_run(**kw):
         "created_at": _iso(0),
         "started_at": _iso(10),
         "finished_at": _iso(40),  # 30-minute session
-        "merged_at": None,
     }
     base.update(kw)
     return base
@@ -213,9 +212,7 @@ def test_metrics_exclude_pending_from_acu_averages(settings):
 
 def test_metrics_session_minutes_as_cost_proxy(settings):
     runs = [
-        _metric_run(
-            issue_number=1, state="merged", acus=1.0, merged_at=_iso(50)
-        ),
+        _metric_run(issue_number=1, state="merged", acus=1.0),
         _metric_run(issue_number=2, state="failed", acus=None, pr_url=None),
     ]
     m = compute_metrics(runs, settings)

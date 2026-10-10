@@ -39,7 +39,7 @@ def test_open_pr_keeps_run_waiting(settings, components):
     assert github.events == [("pr_check", PR_URL)]
 
 
-def test_merged_pr_swaps_label_and_sets_merged_at(settings, components):
+def test_merged_pr_swaps_label(settings, components):
     store, devin, github = components
     github.pr_statuses[PR_URL] = "merged"
     service = AutopilotService(settings, store, devin, github)
@@ -49,13 +49,15 @@ def test_merged_pr_swaps_label_and_sets_merged_at(settings, components):
 
     run_row = store.get(run_id)
     assert run_row["state"] == "merged"
-    assert run_row["merged_at"]
     assert ("remove_label", 1, "devin-pr-open") in github.events
     assert ("add_label", 1, "devin-merged") in github.events
-    assert any(
-        e["event"] == "pr_merged" and e["detail"] == PR_URL
-        for e in store.events_for(run_id)
-    )
+    # The pr_merged event timestamp records when the merge was observed.
+    merged_events = [
+        e for e in store.events_for(run_id)
+        if e["event"] == "pr_merged" and e["detail"] == PR_URL
+    ]
+    assert len(merged_events) == 1
+    assert merged_events[0]["timestamp"]
 
 
 def test_closed_pr_marks_run_rejected(settings, components):
@@ -68,7 +70,6 @@ def test_closed_pr_marks_run_rejected(settings, components):
 
     run_row = store.get(run_id)
     assert run_row["state"] == "rejected"
-    assert run_row["merged_at"] is None
     assert ("remove_label", 1, "devin-pr-open") in github.events
     assert ("add_label", 1, "devin-pr-rejected") in github.events
     assert any(
@@ -118,7 +119,6 @@ def test_rejected_counts_in_metrics(settings):
         "created_at": "2024-01-01T00:00:00+00:00",
         "started_at": "2024-01-01T00:10:00+00:00",
         "finished_at": "2024-01-01T00:40:00+00:00",
-        "merged_at": None,
     }
     runs = [
         {**base, "issue_number": 1, "state": "merged"},
