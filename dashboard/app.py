@@ -106,7 +106,7 @@ def _dashboard_theme() -> alt.theme.ThemeConfig:
 TABLE_ROW_HEIGHT = 35
 TABLE_MAX_ROWS = 8
 # Column widths for the runs table (Issue, Status, Approved, Date,
-# Attempts, Label→result, ACUs, Session, PR, Review, Details). The hover-tooltip
+# Attempts, To result, ACUs, Session, PR, Review, Details). The hover-tooltip
 # script in render_overview() needs the same geometry, so both read
 # these values.
 TABLE_COL_WIDTHS = [220, 160, 70, 60, 65, 65, 60, 70, 50, 130, 70]
@@ -674,8 +674,8 @@ def render_kpis(metrics, runs, issues):
         s = i.get("latest_state")
         latest[s] = latest.get(s, 0) + 1
     issues_headline = (
-        f"{len(issues)} issues · {latest.get('merged', 0)} merged · "
-        f"{latest.get('pr_open', 0)} awaiting merge · "
+        f"{len(issues)} issues: {latest.get('merged', 0)} merged · "
+        f"{latest.get('pr_open', 0)} awaiting · "
         f"{latest.get('needs_human', 0)} need human · "
         f"{latest.get('failed', 0)} failed"
     )
@@ -942,7 +942,7 @@ def render_runs_table(issues, acu_settle_seconds):
                 "Date": fmt_date(latest.get("created_at")),
                 "Attempts": issue["attempts"],
                 # For unfinished runs this column shows elapsed time instead.
-                "Label→result": fmt_delta(
+                "To result": fmt_delta(
                     latest.get("created_at"), latest.get("finished_at") or now
                 ),
                 "ACUs": acu_display(latest, acu_settle_seconds),
@@ -975,7 +975,7 @@ def render_runs_table(issues, acu_settle_seconds):
             "Attempts": st.column_config.NumberColumn(
                 width=TABLE_COL_WIDTHS[4]
             ),
-            "Label→result": st.column_config.TextColumn(
+            "To result": st.column_config.TextColumn(
                 width=TABLE_COL_WIDTHS[5],
                 help="Time from the issue being enqueued to its result, "
                 "including queue wait; in-flight runs show elapsed time.",

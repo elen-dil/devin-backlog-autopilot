@@ -154,7 +154,7 @@ An always-visible KPI row groups the headline numbers:
 Below the KPIs, three tabs:
 
 - **Overview** — a compact runs table (Issue, Status, Approved, Date,
-  Attempts, Label→result, ACUs, Session, PR, Review, Details) plus a
+  Attempts, To result, ACUs, Session, PR, Review, Details) plus a
   per-run pipeline funnel (sessions -> PRs opened -> merged | awaiting
   merge | rejected) and the list of blockers from needs_human runs.
 - **Trends** — a finished-per-hour (or per-day) bar chart of runs
