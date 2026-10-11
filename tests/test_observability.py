@@ -77,9 +77,11 @@ def test_run_events_cover_full_lifecycle(settings, components):
 
     assert names[0] == "queued"
     assert events[0]["detail"] == "source=simulate"
-    assert names[1] == "session_created"
-    assert "devin-sim-" in events[1]["detail"]
-    assert "https://app.devin.ai/sessions/" in events[1]["detail"]
+    # Stale outcome-label cleanup precedes session creation on dispatch.
+    assert names[1:3] == ["github_write", "github_write"]
+    created = names.index("session_created")
+    assert "devin-sim-" in events[created]["detail"]
+    assert "https://app.devin.ai/sessions/" in events[created]["detail"]
 
     # One event per distinct (status, status_detail) observation.
     assert [e["detail"] for e in events if e["event"] == "status_change"] == [
@@ -95,11 +97,20 @@ def test_run_events_cover_full_lifecycle(settings, components):
         "outcome=fixed state=pr_open"
     )
 
+    # The sim session reports its PR on the terminal poll; pr_opened is
+    # stamped before finalize so time-to-PR anchors on the open.
+    pr_opened = [e for e in events if e["event"] == "pr_opened"]
+    assert len(pr_opened) == 1
+    assert pr_opened[0]["detail"].endswith("/pull/9001")
+
     # GitHub write-backs are recorded on both sides of finalize.
     writes = [e["detail"] for e in events if e["event"] == "github_write"]
-    assert len(writes) == 6
+    assert len(writes) == 8
     assert all(d.endswith(": skipped (simulate)") for d in writes)
-    assert "add_label devin-running" in writes[0]
+    # Dispatch strips stale outcome labels before creating the session.
+    assert "remove_label devin-needs-human" in writes[0]
+    assert "remove_label devin-pr-rejected" in writes[1]
+    assert "add_label devin-running" in writes[2]
     assert any(d.startswith("comment session started") for d in writes)
     assert any(d.startswith("comment result") for d in writes)
     last_write = max(i for i, n in enumerate(names) if n == "github_write")
@@ -199,6 +210,7 @@ def test_metrics_hand_computed(settings, components):
         "median_latency_minutes",
         "median_label_to_result_minutes",
         "median_label_to_pr_minutes",
+        "acu_settle_seconds",
         "total_acus",
         "acus_pending",
         "acus_per_run",
@@ -210,6 +222,7 @@ def test_metrics_hand_computed(settings, components):
         "session_minutes_per_merged_fix",
         "first_pass_approval_rate",
         "median_feedback_address_minutes",
+        "feedback_address_count",
     }
     assert m["total_runs"] == 6
     assert m["by_state"] == {
@@ -224,17 +237,19 @@ def test_metrics_hand_computed(settings, components):
     assert m["repo"] == settings.github_repo
     assert m["max_acu_per_session"] == 10
     assert m["funnel"] == {
-        "sessions": 4,  # issues 1, 2, 3, 6 — not 4 (no session_id) or 5 (queued)
+        "sessions": 4,  # runs 1, 2, 3, 6 — not 4 (no session_id) or 5 (queued)
         "prs": 3,
         "merged": 1,
+        "awaiting_merge": 1,
         "rejected": 1,
     }
     assert m["issues_completed"] == 5
     assert m["pr_rate"] == 0.6  # 3 PRs / 5 finished
     assert m["merge_rate"] == 1 / 3  # 1 merged / 3 PRs (rejected counts)
-    assert m["resolution_rate"] == 0.2  # 1 merged / 5 finished
-    # 1 needs_human + 1 rejected / 5 finished
-    assert m["human_intervention_rate"] == 0.4
+    # decided runs exclude the still-open PR: 1 merged / 4 decided
+    assert m["resolution_rate"] == 0.25
+    # 1 needs_human + 1 rejected / 4 decided
+    assert m["human_intervention_rate"] == 0.5
     # latencies 60, 30, 30, 40, 40 -> median 40
     assert m["median_latency_minutes"] == 40.0
     # label->result 70, 60, 50, 80, 90 -> median 70
@@ -253,8 +268,9 @@ def test_metrics_hand_computed(settings, components):
     assert m["runs_at_cap"] == 1
 
 
-def test_funnel_counts_distinct_issues(settings, components):
-    """Re-remediated issues count once per funnel stage, keeping it monotonic."""
+def test_funnel_counts_runs_not_issues(settings, components):
+    """The funnel is per run: a retried issue counts once per stage per
+    attempt, and merged + awaiting merge + rejected == PRs opened."""
     store, _, _ = components
     _insert_run(store, 7, "needs_human", created=0, started=1, finished=2,
                 session_id="s-7a")
@@ -264,13 +280,19 @@ def test_funnel_counts_distinct_issues(settings, components):
 
     m = compute_metrics(store.all(), settings)
     assert m["total_runs"] == 3
-    # Issue 7's two sessions still count once at the "sessions" stage.
+    # Issue 7's two sessions count once each at the "sessions" stage.
     assert m["funnel"] == {
-        "sessions": 1,
+        "sessions": 2,
         "prs": 1,
         "merged": 1,
+        "awaiting_merge": 0,
         "rejected": 0,
     }
+    funnel = m["funnel"]
+    assert (
+        funnel["merged"] + funnel["awaiting_merge"] + funnel["rejected"]
+        == funnel["prs"]
+    )
 
 
 def test_metrics_endpoint_and_empty_guards(settings, components):
@@ -290,8 +312,11 @@ def test_metrics_endpoint_and_empty_guards(settings, components):
         "sessions": 0,
         "prs": 0,
         "merged": 0,
+        "awaiting_merge": 0,
         "rejected": 0,
     }
+    assert m["acu_settle_seconds"] == 1800
+    assert m["feedback_address_count"] == 0
 
 
 def test_simulated_runs_filtered_when_not_simulating(settings, components):

@@ -112,7 +112,7 @@ ACU_HELP = (
 TABLE_ROW_HEIGHT = 35
 TABLE_MAX_ROWS = 8
 # Column widths for the runs table (Issue, Status, Approved, Date,
-# Attempts, Time, ACUs, Session, PR, Review, Details). The hover-tooltip
+# Attempts, Label→result, ACUs, Session, PR, Review, Details). The hover-tooltip
 # script in render_overview() needs the same geometry, so both read
 # these values.
 TABLE_COL_WIDTHS = [220, 160, 70, 60, 65, 65, 60, 70, 50, 130, 70]
@@ -194,12 +194,17 @@ def fmt_pct(value):
     return "n/a" if value is None else f"{value:.0%}"
 
 
-def acu_display(run) -> str:
-    """ACU cell text: 'pending' once a run is finished but usage hasn't been
-    reported, '—' while still running with no reading yet."""
+def acu_display(run, settle_seconds=1800) -> str:
+    """ACU cell text: 'pending' while a finished run is still inside the
+    ACU settle window (usage can still land), 'not reported' once it has
+    closed, '—' while still running with no reading yet."""
     acus = run.get("acus")
     if run.get("finished_at") and not acus:
-        return "pending"
+        finished = parse_ts(run.get("finished_at"))
+        settled = finished is None or (
+            datetime.now(timezone.utc) - finished
+        ).total_seconds() > settle_seconds
+        return "not reported" if settled else "pending"
     return "—" if acus is None else f"{acus:.1f}"
 
 
@@ -470,8 +475,15 @@ def parse_output(run):
 
 def tests_text(run):
     total = run.get("tests_run")
-    if total is None:
+    failed = run.get("tests_failed")
+    if total is None and failed is None:
         return "—"
+    if failed is not None:
+        # tests_run is the collected count; failures get their own field.
+        return (
+            f"{run.get('tests_passed') or 0} passed · "
+            f"{failed} failed · {total or 0} run"
+        )
     return f"{run.get('tests_passed') or 0}/{total}"
 
 
@@ -491,25 +503,67 @@ def by_state_counts(metrics, runs):
 
 
 def funnel_counts(metrics, runs):
+    """Per-run funnel stages. The last three partition "PRs opened":
+    every run with a PR is merged, awaiting merge, or rejected."""
     funnel = metrics.get("funnel") or {}
     if funnel:
         return [
             ("Sessions", funnel.get("sessions", 0)),
-            ("PRs", funnel.get("prs", 0)),
-            ("Merged (PRs)", funnel.get("merged", 0)),
-            ("Rejected (PRs)", funnel.get("rejected", 0)),
+            ("PRs opened", funnel.get("prs", 0)),
+            ("Merged", funnel.get("merged", 0)),
+            ("Awaiting merge", funnel.get("awaiting_merge", 0)),
+            ("Rejected", funnel.get("rejected", 0)),
         ]
     # Older API shape: derive from the runs list.
     return [
         ("Sessions", sum(1 for r in runs if r.get("session_id"))),
-        ("PRs", sum(1 for r in runs if r.get("pr_url"))),
-        ("Merged (PRs)", sum(1 for r in runs if r.get("state") == "merged")),
-        ("Rejected (PRs)", sum(1 for r in runs if r.get("state") == "rejected")),
+        ("PRs opened", sum(1 for r in runs if r.get("pr_url"))),
+        ("Merged", sum(1 for r in runs if r.get("state") == "merged")),
+        ("Awaiting merge", sum(1 for r in runs if r.get("state") == "pr_open")),
+        ("Rejected", sum(1 for r in runs if r.get("state") == "rejected")),
     ]
 
 
 def is_finished(run):
     return bool(run.get("finished_at")) or run.get("state") in TERMINAL_STATES
+
+
+def outcome_bucket(run):
+    """(label, flagged) for the Trends outcome breakdown. PR states render
+    as themselves: merged means the fix was applied, rejected runs keep
+    outcome="fixed" in the DB, and pr_open runs show "Awaiting merge" like
+    the runs table rather than the premature "Fix proposed". Other
+    finished runs fall back to their reported outcome, or to state when
+    they failed before producing a report."""
+    raw = (
+        run.get("state")
+        if run.get("state") in ("merged", "rejected", "pr_open")
+        else (run.get("outcome") or run.get("state"))
+    )
+    label = state_label(raw) if raw in STATE_LABELS else outcome_label(raw)
+    return label, raw not in ("fixed", "merged")
+
+
+def cost_run_label(run, runs, limit=48):
+    """Per-run bar label for the Cost chart: the issue_ref, or
+    'issue_ref · attempt N' (run-id order) when the issue ran more than
+    once, so retries never collapse into one bar."""
+    siblings = sorted(
+        (
+            s
+            for s in runs
+            if s.get("issue_number") == run.get("issue_number")
+        ),
+        key=lambda s: s.get("id") or 0,
+    )
+    if len(siblings) < 2:
+        return issue_ref(run, limit=limit)
+    n = next(
+        i
+        for i, s in enumerate(siblings, 1)
+        if s.get("id") == run.get("id")
+    )
+    return f"{issue_ref(run, limit=limit)} · attempt {n}"
 
 
 # ---------------------------------------------------------------------------
@@ -589,9 +643,20 @@ def _kpi_tile(label, value, help_text):
     )
 
 
-def render_kpis(metrics, runs):
+def render_kpis(metrics, runs, issues):
     """One always-visible row of grouped KPI tiles."""
     counts = by_state_counts(metrics, runs)
+    # Issue-level headline: latest state across tracked issues.
+    latest = {}
+    for i in issues:
+        s = i.get("latest_state")
+        latest[s] = latest.get(s, 0) + 1
+    issues_headline = (
+        f"{len(issues)} issues · {latest.get('merged', 0)} merged · "
+        f"{latest.get('pr_open', 0)} awaiting merge · "
+        f"{latest.get('needs_human', 0)} need human · "
+        f"{latest.get('failed', 0)} failed"
+    )
     # key= lands as a .st-key-kpi_grid class; the CSS block wraps this row
     # cleanly (4-across -> 2x2 -> stacked) as the viewport narrows.
     with st.container(key="kpi_grid"):
@@ -599,7 +664,18 @@ def render_kpis(metrics, runs):
 
         with status_col:
             group_label("Status")
-            st.markdown(
+            issues_col, active_col = st.columns(2)
+            issues_col.markdown(
+                _kpi_tile(
+                    "Issues",
+                    issues_headline,
+                    "Each tracked issue counted once, at its latest run's "
+                    "state. Retried issues count at the most recent "
+                    "attempt.",
+                ),
+                unsafe_allow_html=True,
+            )
+            active_col.markdown(
                 _kpi_tile(
                     "Active",
                     f"{counts['running']} running · {counts['queued']} queued",
@@ -617,8 +693,8 @@ def render_kpis(metrics, runs):
                 _kpi_tile(
                     "Resolution rate",
                     fmt_pct(metrics.get("resolution_rate")),
-                    "Share of finished runs that ended in a merged fix. "
-                    "Formula: merged runs ÷ finished runs.",
+                    "merged ÷ decided runs; PRs still awaiting merge are "
+                    "excluded.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -633,22 +709,24 @@ def render_kpis(metrics, runs):
             )
             human_col.markdown(
                 _kpi_tile(
-                    "Human interventions",
+                    "Escalated to human",
                     fmt_pct(metrics.get("human_intervention_rate")),
-                    "Share of finished runs that ended waiting on a human "
-                    "decision or with a rejected PR. Formula: (needs human "
-                    "+ rejected runs) ÷ finished runs.",
+                    "Share of decided runs that ended needs-human or with a "
+                    "rejected PR. Needs-human outcomes are policy "
+                    "escalations (major-version bumps, releases under 30 "
+                    "days old, auth/crypto changes), not failures. "
+                    "Formula: (needs human + rejected) ÷ decided runs; "
+                    "PRs still awaiting merge are excluded.",
                 ),
                 unsafe_allow_html=True,
             )
             fpa_col.markdown(
                 _kpi_tile(
-                    "First-pass approval",
+                    "Merged without changes",
                     fmt_pct(metrics.get("first_pass_approval_rate")),
-                    "Share of merged PRs that merged with zero human "
-                    "review rounds. Formula: merged PRs with 0 review "
-                    "rounds ÷ merged PRs. Comments containing '(aside)' "
-                    "don't count as review rounds.",
+                    "Merged PRs with zero feedback rounds ÷ merged PRs. "
+                    "PRs merged with no review at all count. Comments "
+                    "containing '(aside)' don't count as feedback rounds.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -660,21 +738,29 @@ def render_kpis(metrics, runs):
                 _kpi_tile(
                     "Median time to PR",
                     fmt_minutes(metrics.get("median_label_to_pr_minutes")),
-                    "Median minutes from an issue being labeled to its PR "
-                    "opening. Formula: median(PR opened time − labeled "
-                    "time).",
+                    "Median minutes from the issue being enqueued (label "
+                    "seen by the poller) to Devin opening the PR. Runs "
+                    "whose PR opened before tracking began fall back to "
+                    "the run's finish time.",
                 ),
                 unsafe_allow_html=True,
+            )
+            addr_minutes = metrics.get("median_feedback_address_minutes")
+            addr_text = (
+                "n/a"
+                if addr_minutes is None
+                else f"{addr_minutes:.1f} min "
+                f"(n={metrics.get('feedback_address_count') or 0})"
             )
             addr_col.markdown(
                 _kpi_tile(
                     "Median time to address",
-                    fmt_minutes(
-                        metrics.get("median_feedback_address_minutes")
-                    ),
-                    "Median minutes from a reviewer's feedback to "
-                    "Devin's reply marking it addressed. Formula: median "
-                    "over feedback_addressed events.",
+                    addr_text,
+                    "Median minutes from a reviewer's feedback on the PR "
+                    "to Devin's reply marking it addressed. The reply "
+                    "comes from Devin's built-in PR monitoring on the PR, "
+                    "which the service observes. n is the number of "
+                    "addressed feedback items.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -719,7 +805,7 @@ def render_funnel(metrics, runs):
         .encode(
             x=alt.X(
                 "Count:Q",
-                title="Issues",
+                title="Runs",
                 axis=integer_axis(df["Count"].max()),
             ),
             y=alt.Y(
@@ -745,8 +831,11 @@ def render_awaiting_decision(issues):
     for issue in waiting:
         run = issue["runs"][-1]
         report = parse_output(run) or {}
+        # not_reproducible verdicts put the explanation in summary, not
+        # blockers.
         rule = (
             report.get("blockers")
+            or report.get("summary")
             or run.get("error")
             or "No blocker detail recorded."
         )
@@ -756,7 +845,7 @@ def render_awaiting_decision(issues):
         st.markdown(f"- {ref} — {rule} · waiting {waited}")
 
 
-def render_runs_table(issues):
+def render_runs_table(issues, acu_settle_seconds):
     if not issues:
         st.caption("No runs yet — waiting for issues labeled `devin-remediate`.")
         return
@@ -798,10 +887,10 @@ def render_runs_table(issues):
                 "Date": fmt_date(latest.get("created_at")),
                 "Attempts": issue["attempts"],
                 # For unfinished runs this column shows elapsed time instead.
-                "Time": fmt_delta(
+                "Label→result": fmt_delta(
                     latest.get("created_at"), latest.get("finished_at") or now
                 ),
-                "ACUs": acu_display(latest),
+                "ACUs": acu_display(latest, acu_settle_seconds),
                 "Session": latest.get("session_url"),
                 "PR": latest.get("pr_url"),
                 "Review": review_display(latest),
@@ -831,7 +920,11 @@ def render_runs_table(issues):
             "Attempts": st.column_config.NumberColumn(
                 width=TABLE_COL_WIDTHS[4]
             ),
-            "Time": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[5]),
+            "Label→result": st.column_config.TextColumn(
+                width=TABLE_COL_WIDTHS[5],
+                help="Time from the issue being enqueued to its result, "
+                "including queue wait; in-flight runs show elapsed time.",
+            ),
             "ACUs": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[6]),
             "Session": st.column_config.LinkColumn(
                 "Session", display_text="Open", width=TABLE_COL_WIDTHS[7]
@@ -853,7 +946,7 @@ def render_runs_table(issues):
     # the fragment auto-refresh never reopens a dismissed dialog.
     click = st.session_state.get("run_detail_click")
     if click is not None:
-        issue_detail_dialog(ordered[click["row"]])
+        issue_detail_dialog(ordered[click["row"]], acu_settle_seconds)
         return
 
     # Row selection also opens the dialog, but only when the selection
@@ -863,7 +956,7 @@ def render_runs_table(issues):
         return
     st.session_state["_selected_row"] = selected
     if selected:
-        issue_detail_dialog(ordered[selected[0]])
+        issue_detail_dialog(ordered[selected[0]], acu_settle_seconds)
 
 
 def approval_detail(event):
@@ -874,20 +967,39 @@ def approval_detail(event):
         return {}
 
 
+def _latest_feedback_excerpt(run):
+    """Excerpt of the run's most recent review_feedback event, or None.
+    Backs up rejection_reason for rows that predate that column."""
+    for e in reversed(run.get("events") or []):
+        if e.get("event") != "review_feedback":
+            continue
+        try:
+            info = json.loads(e.get("detail") or "{}")
+        except ValueError:
+            continue
+        excerpt = str(info.get("excerpt") or "").strip()
+        if excerpt:
+            return excerpt
+    return None
+
+
 def run_reason(run):
-    """Why this attempt ended as it did: rejection comment, escalation
-    rule, or error, whichever applies."""
+    """Why this attempt ended as it did: rejection comment (or the latest
+    review feedback when none was stored), escalation rule or summary,
+    then error, whichever applies."""
     report = parse_output(run) or {}
     return (
         run.get("rejection_reason")
+        or _latest_feedback_excerpt(run)
         or report.get("blockers")
+        or report.get("summary")
         or run.get("error")
         or "—"
     )
 
 
 @st.dialog("Issue details", width="large")
-def issue_detail_dialog(issue):
+def issue_detail_dialog(issue, acu_settle_seconds):
     title = issue.get("title") or issue["runs"][-1].get("title") or ""
     st.markdown(f"##### #{issue['issue_number']} {title}")
     if issue.get("issue_url"):
@@ -899,7 +1011,7 @@ def issue_detail_dialog(issue):
             f"Outcome: {outcome_label(run.get('outcome'))} · "
             f"Started: {fmt_ts(run.get('started_at'))} · "
             f"Finished: {fmt_ts(run.get('finished_at'))} · "
-            f"ACUs: {acu_display(run)} · "
+            f"ACUs: {acu_display(run, acu_settle_seconds)} · "
             f"Tests: {tests_text(run)}"
         )
         links = []
@@ -939,10 +1051,17 @@ def issue_detail_dialog(issue):
                         st.markdown(f"- `{path}`")
                 else:
                     st.markdown("**Files changed:** —")
-                st.markdown(
-                    f"**Tests:** {report.get('tests_passed') or 0}"
-                    f"/{report.get('tests_run') or 0} passed"
-                )
+                if report.get("tests_failed") is not None:
+                    st.markdown(
+                        f"**Tests:** {report.get('tests_passed') or 0}"
+                        f" passed · {report.get('tests_failed')} failed · "
+                        f"{report.get('tests_run') or 0} run"
+                    )
+                else:
+                    st.markdown(
+                        f"**Tests:** {report.get('tests_passed') or 0}"
+                        f"/{report.get('tests_run') or 0} passed"
+                    )
                 st.markdown(
                     f"**Risk notes:** {report.get('risk_notes') or '—'}"
                 )
@@ -1006,7 +1125,9 @@ def render_overview(metrics, runs, issues):
     with st.container(key="overview_split"):
         table_col, side_col = st.columns([7, 4])
         with table_col:
-            render_runs_table(issues)
+            render_runs_table(
+                issues, metrics.get("acu_settle_seconds") or 1800
+            )
         with side_col:
             section_title("Pipeline")
             render_funnel(metrics, runs)
@@ -1029,7 +1150,7 @@ def render_trends(metrics, runs):
         left, right = st.columns(2)
 
     with left:
-        section_title("Completed over time")
+        section_title("Finished over time")
         finished = sorted(
             (r for r in runs if parse_ts(r.get("finished_at"))),
             key=lambda r: parse_ts(r["finished_at"]),
@@ -1042,7 +1163,7 @@ def render_trends(metrics, runs):
                     "Finished": pd.to_datetime(
                         [r["finished_at"] for r in finished], utc=True
                     ),
-                    "Completed": range(1, len(finished) + 1),
+                    "Runs": [1] * len(finished),
                 }
             )
             # Wall-clock times in DISPLAY_TZ; dropping tzinfo keeps the axis
@@ -1072,7 +1193,7 @@ def render_trends(metrics, runs):
                     ),
                     fill_value=0,
                 )
-                .rename("Completed")
+                .rename("Runs")
                 .rename_axis("Bucket")
                 .reset_index()
             )
@@ -1091,10 +1212,10 @@ def render_trends(metrics, runs):
                         axis=axis,
                     ),
                     y=alt.Y(
-                        "Completed:Q",
-                        title="Runs completed",
+                        "Runs:Q",
+                        title="Runs finished (any outcome)",
                         axis=integer_axis(
-                            counts["Completed"].max(), grid=True
+                            counts["Runs"].max(), grid=True
                         ),
                     ),
                     tooltip=[
@@ -1103,7 +1224,7 @@ def render_trends(metrics, runs):
                             title="Finished at",
                             format="%b %d %H:%M",
                         ),
-                        alt.Tooltip("Completed:Q", title="Runs completed"),
+                        alt.Tooltip("Runs:Q", title="Runs finished"),
                     ],
                 )
                 .properties(height=CHART_HEIGHT)
@@ -1119,19 +1240,9 @@ def render_trends(metrics, runs):
             outcome_counts = {}
             outcome_flagged = {}
             for r in finished:
-                # Terminal PR states render as themselves: merged means the
-                # fix was applied, and rejected runs keep outcome="fixed" in
-                # the DB. Other finished runs fall back to their reported
-                # outcome, or to state when they failed before producing a
-                # report.
-                raw = (
-                    r.get("state")
-                    if r.get("state") in ("merged", "rejected")
-                    else (r.get("outcome") or r.get("state"))
-                )
-                label = outcome_label(raw)
+                label, flagged = outcome_bucket(r)
                 outcome_counts[label] = outcome_counts.get(label, 0) + 1
-                outcome_flagged[label] = raw not in ("fixed", "merged")
+                outcome_flagged[label] = flagged
             df = pd.DataFrame(
                 [
                     {
@@ -1187,12 +1298,15 @@ def render_cost(metrics, runs):
     ]
     df = pd.DataFrame(
         {
-            "Run": [issue_ref(r) for r in timed],
+            "Run": [cost_run_label(r, runs) for r in timed],
             # Untruncated name for the hover tooltip; the y-axis label uses
             # the truncated Run value.
-            "Full": [issue_ref(r, limit=None) for r in timed],
+            "Full": [cost_run_label(r, runs, limit=None) for r in timed],
             "Minutes": [session_minutes(r) for r in timed],
-            "ACUs": [acu_display(r) for r in timed],
+            "ACUs": [
+                acu_display(r, metrics.get("acu_settle_seconds") or 1800)
+                for r in timed
+            ],
             "At cap": at_cap,
         }
     )
@@ -1239,7 +1353,7 @@ def render_cost(metrics, runs):
     reported = sum(1 for r in timed if (r.get("acus") or 0) > 0)
     note = (
         f"ACUs reported for {reported}/{len(timed)} finished runs; "
-        "unreported usage shows 'pending'."
+        "Devin's API returned no usage for the rest."
     )
     if any(at_cap):
         note += " Muted bars hit the per-session ACU cap."
@@ -1334,7 +1448,7 @@ def render():
         return
 
     render_banner(health, metrics)
-    render_kpis(metrics, runs)
+    render_kpis(metrics, runs, issues)
     # on_change="rerun" makes tabs dynamic: only the open tab renders, so
     # charts never mount inside a hidden (zero-width) container and stay
     # correctly sized when switching.

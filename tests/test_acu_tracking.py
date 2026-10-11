@@ -182,6 +182,42 @@ def test_finalize_does_not_terminate_exited_session(settings, components):
     assert devin.terminated == []
 
 
+def test_finalize_persists_tests_failed(settings, components):
+    """tests_run is the collected count, so the real failure count has its
+    own field persisted on the run and echoed in the result comment."""
+    store, _, github = components
+    devin = _SessionStub(
+        {
+            "session_id": "s1",
+            "status": "exit",
+            "status_detail": None,
+            "acus_consumed": 1.0,
+            "pull_requests": [{"pr_url": "https://x/pr/1"}],
+            "structured_output": {
+                "outcome": "fixed",
+                "summary": "done",
+                "tests_run": 22367,
+                "tests_passed": 22320,
+                "tests_failed": 0,
+            },
+        }
+    )
+    service = AutopilotService(settings, store, devin, github)
+    run_id = _running_run(store)
+
+    run(service.session_poll_tick())
+
+    row = store.get(run_id)
+    assert row["tests_run"] == 22367
+    assert row["tests_passed"] == 22320
+    assert row["tests_failed"] == 0
+    finish = next(
+        e[2] for e in github.events
+        if e[0] == "comment" and e[2].startswith("Autopilot finished")
+    )
+    assert "tests failed: 0" in finish
+
+
 def _metric_run(**kw):
     base = {
         "state": "pr_open",

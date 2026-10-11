@@ -43,6 +43,21 @@ _PR_RESOLUTIONS = {
 # author_association values on issue comments that imply write access.
 REVIEWER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
+# Issue comments the service posts itself. They go out under the
+# maintainer's token, so they carry a write-access author_association and
+# the approval flow must never adopt one as the reviewer decision. Both
+# the comment writers and the _resolve_approval filter reference these.
+_COMMENT_SESSION_STARTED = "Devin session started:"
+_COMMENT_RESULT = "Autopilot finished:"
+_COMMENT_START_FAILED = "Autopilot could not start"
+_COMMENT_NEEDS_DECISION = "Autopilot: "
+SERVICE_COMMENT_PREFIXES = (
+    _COMMENT_SESSION_STARTED,
+    _COMMENT_RESULT,
+    _COMMENT_START_FAILED,
+    _COMMENT_NEEDS_DECISION,
+)
+
 # PR review states that count as human feedback. APPROVED is tracked
 # separately: it emits pr_approved, not review_feedback.
 FEEDBACK_REVIEW_STATES = {"CHANGES_REQUESTED", "COMMENTED"}
@@ -99,6 +114,12 @@ def _has_aside(body) -> bool:
     """Comments tagged "(aside)" are conversational, not actionable
     feedback."""
     return "(aside)" in (body or "").lower()
+
+
+def _is_service_comment(body) -> bool:
+    """Comments the service posts itself can never be a reviewer's
+    approval decision."""
+    return (body or "").startswith(SERVICE_COMMENT_PREFIXES)
 
 
 class AutopilotService:
@@ -211,6 +232,7 @@ class AutopilotService:
             c
             for c in comments
             if c.get("author_association") in REVIEWER_ASSOCIATIONS
+            and not _is_service_comment(c.get("body"))
             and (
                 since is None
                 or (_parse_ts(c.get("created_at")) or epoch) > since
@@ -277,8 +299,9 @@ class AutopilotService:
             "comment approval needed",
             self._github.comment,
             issue_number,
-            f"Autopilot: `{self._s.approval_label}` is set, but no reviewer "
-            "decision was found. A maintainer with write access must post a "
+            f"{_COMMENT_NEEDS_DECISION}`{self._s.approval_label}` is set, "
+            "but no reviewer decision was found. A maintainer with write "
+            "access must post a "
             "comment stating the decision, then re-apply "
             f"`{self._s.trigger_label}` and `{self._s.approval_label}`.",
         )
@@ -300,6 +323,24 @@ class AutopilotService:
             if approval is None:
                 await self._fail_without_decision(run)
                 return
+        # A retry can land while the previous run's outcome labels are
+        # still on the issue; strip them so the board reflects the new
+        # attempt, not the old result. Removal is 404-tolerant and goes
+        # through _gh_write like every label mutation.
+        await self._gh_write(
+            run["id"],
+            f"remove_label {self._s.needs_human_label}",
+            self._github.remove_label,
+            issue_number,
+            self._s.needs_human_label,
+        )
+        await self._gh_write(
+            run["id"],
+            f"remove_label {self._s.pr_rejected_label}",
+            self._github.remove_label,
+            issue_number,
+            self._s.pr_rejected_label,
+        )
         # Claim the run before the async call: if the process dies between
         # create_session and writing the session_id, the stale-claim sweep in
         # session_poll_tick fails the run instead of re-dispatching it and
@@ -324,7 +365,6 @@ class AutopilotService:
                     url=run["issue_url"],
                     body=run["issue_body"],
                     repo=self._s.github_repo,
-                    needs_human_label=self._s.needs_human_label,
                     approval=approval,
                 ),
                 title=f"autopilot: issue #{issue_number}",
@@ -365,7 +405,7 @@ class AutopilotService:
                 "comment startup failure",
                 self._github.comment,
                 issue_number,
-                f"Autopilot could not start a Devin session: `{exc}`",
+                f"{_COMMENT_START_FAILED} a Devin session: `{exc}`",
             )
             return
 
@@ -391,7 +431,7 @@ class AutopilotService:
             "comment session started",
             self._github.comment,
             issue_number,
-            f"Devin session started: {session.get('url')}\n"
+            f"{_COMMENT_SESSION_STARTED} {session.get('url')}\n"
             f"ACU cap: {self._s.max_acu_per_session}",
         )
 
@@ -429,6 +469,23 @@ class AutopilotService:
                 run["id"], session.get("status"), session.get("status_detail")
             )
             self._record_acus(run, session.get("acus_consumed"))
+            # Time-to-PR anchors on the PR's creation, not session finish:
+            # as soon as a session reports a PR, persist it and stamp a
+            # pr_opened event (once per run).
+            pr_url = next(
+                (
+                    p["pr_url"]
+                    for p in session.get("pull_requests", [])
+                    if p.get("pr_url")
+                ),
+                None,
+            )
+            if pr_url and not any(
+                e["event"] == "pr_opened"
+                for e in self._store.events_for(run["id"])
+            ):
+                self._store.update(run["id"], pr_url=pr_url)
+                self._store.add_event(run["id"], "pr_opened", pr_url)
             if session_is_terminal(session.get("status"), session.get("status_detail")):
                 try:
                     await self._finalize(run, session)
@@ -450,7 +507,7 @@ class AutopilotService:
         pr_url = next(
             (p["pr_url"] for p in session.get("pull_requests", []) if p.get("pr_url")),
             None,
-        )
+        ) or run["pr_url"]  # an earlier poll may already have recorded it
         blockers = output.get("blockers") or ""
         acus = session.get("acus_consumed")
         # Consumption only grows and live polls may already have stored a
@@ -516,6 +573,7 @@ class AutopilotService:
             summary=output.get("summary"),
             tests_run=output.get("tests_run"),
             tests_passed=output.get("tests_passed"),
+            tests_failed=output.get("tests_failed"),
             acus=acus,
             output_json=json.dumps(output) if output else None,
             error=None if state != "failed" else f"status={status} detail={detail}",
@@ -551,6 +609,7 @@ class AutopilotService:
                 summary=output.get("summary"),
                 tests_run=output.get("tests_run"),
                 tests_passed=output.get("tests_passed"),
+                tests_failed=output.get("tests_failed"),
                 risk_notes=output.get("risk_notes"),
                 blockers=blockers,
                 acus=acus,
@@ -797,13 +856,52 @@ class AutopilotService:
                 logger.exception("merge check failed for run %s", run["id"])
 
     async def review_backfill_tick(self) -> None:
-        """Backfill review state for every run that has a PR, whatever its
-        state. Runs once at startup: it picks up feedback posted while the
-        service was down and computes review_rounds for already-merged
-        runs, which the periodic merge_check_tick never rescans."""
+        """Backfill PR-derived data for every run that has a PR, whatever
+        its state. Runs once at startup: it stamps pr_opened events for
+        runs that predate them (the PR's GitHub created_at is the real
+        open time), stores the closing comment on rejected runs that
+        predate the rejection_reason column, picks up feedback posted
+        while the service was down, and computes review_rounds for
+        already-merged runs, which the periodic merge_check_tick never
+        rescans."""
         for run in self._store.all():
             if not run["pr_url"]:
                 continue
+            if not any(
+                e["event"] == "pr_opened"
+                for e in self._store.events_for(run["id"])
+            ):
+                try:
+                    created_at = await self._github.pr_created_at(
+                        run["pr_url"]
+                    )
+                    if created_at:
+                        self._store.add_event(
+                            run["id"],
+                            "pr_opened",
+                            run["pr_url"],
+                            timestamp=created_at,
+                        )
+                except Exception:
+                    # A failed fetch just retries on the next startup; the
+                    # metrics fallback to finished_at covers the gap.
+                    logger.exception(
+                        "pr_opened backfill failed for run %s", run["id"]
+                    )
+            if run["state"] == "rejected" and run["rejection_reason"] is None:
+                try:
+                    reason = await self._github.latest_pr_comment(
+                        run["pr_url"]
+                    )
+                    if reason:
+                        self._store.update(
+                            run["id"], rejection_reason=reason
+                        )
+                except Exception:
+                    logger.exception(
+                        "rejection reason backfill failed for run %s",
+                        run["id"],
+                    )
             try:
                 await self._review_scan(run)
             except Exception:
@@ -853,11 +951,12 @@ OUTCOME_VERDICTS = {
 def _finish_comment(**f) -> str:
     verdict = OUTCOME_VERDICTS.get(f["outcome"], f["outcome"])
     lines = [
-        f"Autopilot finished: {verdict}",
+        f"{_COMMENT_RESULT} {verdict}",
         f"Session: {f['session_url']}",
         f"PR: {f['pr_url'] or 'none'}",
         f"Summary: {f['summary'] or 'n/a'}",
-        f"Tests run: {f['tests_run']}, tests passed: {f['tests_passed']}",
+        f"Tests run: {f['tests_run']}, tests passed: {f['tests_passed']}, "
+        f"tests failed: {f['tests_failed']}",
         f"Risk notes: {f['risk_notes'] or 'n/a'}",
         f"Blockers: {f['blockers'] or 'none'}",
         f"ACUs used: {f['acus']}",
@@ -894,6 +993,13 @@ def compute_metrics(runs, settings, events=None) -> dict:
         + by_state.get("needs_human", 0)
         + by_state.get("failed", 0)
     )
+    # Decided runs carry a final outcome; pr_open runs still await merge.
+    decided = (
+        merged
+        + rejected
+        + by_state.get("needs_human", 0)
+        + by_state.get("failed", 0)
+    )
 
     # started_at -> finished_at: active session time.
     latencies = _minutes_between(runs, "started_at", "finished_at")
@@ -903,10 +1009,23 @@ def compute_metrics(runs, settings, events=None) -> dict:
     median_label_to_result = (
         statistics.median(label_to_result) if label_to_result else None
     )
-    # created_at -> finished_at over runs that produced a PR.
-    label_to_pr = _minutes_between(
-        [r for r in runs if r["pr_url"]], "created_at", "finished_at"
-    )
+    # created_at -> PR creation over runs that produced a PR. The pr_opened
+    # event carries the real open time; runs that predate it (or whose
+    # backfill fetch failed) fall back to finished_at.
+    pr_opened_at = {}
+    for e in events or []:
+        if e.get("event") == "pr_opened":
+            pr_opened_at.setdefault(
+                e.get("run_id"), _parse_ts(e.get("timestamp"))
+            )
+    label_to_pr = []
+    for r in runs:
+        if not r.get("pr_url"):
+            continue
+        start = _parse_ts(r.get("created_at"))
+        end = pr_opened_at.get(r.get("id")) or _parse_ts(r.get("finished_at"))
+        if start and end:
+            label_to_pr.append((end - start).total_seconds() / 60)
     median_label_to_pr = statistics.median(label_to_pr) if label_to_pr else None
 
     total_acus = sum(r["acus"] or 0 for r in runs)
@@ -959,35 +1078,35 @@ def compute_metrics(runs, settings, events=None) -> dict:
         "simulate": settings.simulate,
         "repo": settings.github_repo,
         "max_acu_per_session": settings.max_acu_per_session,
-        # Funnel counts distinct issues at every stage: an issue remediated
-        # twice still counts once per stage. Retries still show up in ACU
-        # totals. "sessions" keys on session_id — a Devin session really
-        # existed — not started_at, which is stamped on dispatch claim
-        # even when create_session fails.
+        # ACU usage settles for this long after finalize; the dashboard
+        # shows "not reported" once the window closes.
+        "acu_settle_seconds": ACU_SETTLE_SECONDS,
+        # The funnel counts runs (not distinct issues) at every stage, so
+        # the terminal stages partition the PR count: merged + awaiting
+        # merge + rejected == prs. "sessions" keys on session_id — a
+        # Devin session really existed — not started_at, which is stamped
+        # on dispatch claim even when create_session fails.
         "funnel": {
-            "sessions": len(
-                {r["issue_number"] for r in runs if r["session_id"]}
-            ),
-            "prs": len({r["issue_number"] for r in runs if r["pr_url"]}),
-            "merged": len(
-                {r["issue_number"] for r in runs if r["state"] == "merged"}
-            ),
-            "rejected": len(
-                {r["issue_number"] for r in runs if r["state"] == "rejected"}
-            ),
+            "sessions": sum(1 for r in runs if r["session_id"]),
+            "prs": sum(1 for r in runs if r["pr_url"]),
+            "merged": merged,
+            "awaiting_merge": by_state.get("pr_open", 0),
+            "rejected": rejected,
         },
         "issues_completed": finished,
         # pr_rate: fraction of finished runs that produced a PR.
         "pr_rate": pr_opened / finished if finished else 0.0,
         # merge_rate: of the PRs Devin opened, how many were merged.
         "merge_rate": merged / pr_opened if pr_opened else 0.0,
-        # resolution_rate: of finished runs, how many shipped a merged fix.
-        "resolution_rate": merged / finished if finished else 0.0,
-        # human_intervention_rate: of finished runs, how many ended waiting
+        # decided runs have a final outcome; pr_open runs are still
+        # awaiting merge and stay out of both rate denominators.
+        # resolution_rate: of decided runs, how many shipped a merged fix.
+        "resolution_rate": merged / decided if decided else 0.0,
+        # human_intervention_rate: of decided runs, how many ended waiting
         # on a human decision or with a rejected PR.
         "human_intervention_rate": (
-            (by_state.get("needs_human", 0) + rejected) / finished
-            if finished
+            (by_state.get("needs_human", 0) + rejected) / decided
+            if decided
             else 0.0
         ),
         "median_latency_minutes": median_latency,
@@ -1016,6 +1135,7 @@ def compute_metrics(runs, settings, events=None) -> dict:
         "median_feedback_address_minutes": (
             statistics.median(address_minutes) if address_minutes else None
         ),
+        "feedback_address_count": len(address_minutes),
     }
 
 

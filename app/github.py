@@ -86,6 +86,15 @@ class GitHubClient:
             return None
         return comments[-1].get("body")
 
+    async def pr_created_at(self, pr_url: str):
+        """The PR's created_at (ISO 8601), or None when the fetch fails.
+        Used to backfill pr_opened events with the real open time."""
+        owner, repo, number = _pr_parts(pr_url)
+        resp = await self._http.get(f"/repos/{owner}/{repo}/pulls/{number}")
+        if resp.status_code != 200:
+            return None
+        return resp.json().get("created_at")
+
     async def pr_status(self, pr_url: str) -> str:
         owner, repo, number = _pr_parts(pr_url)
         resp = await self._http.get(f"/repos/{owner}/{repo}/pulls/{number}")
@@ -143,6 +152,9 @@ class NullGitHubClient:
         # pr_url -> "open" | "merged" | "closed"; tests set entries to
         # steer merge_check_tick.
         self.pr_statuses = {}
+        # pr_url -> ISO 8601 created_at; tests set entries to steer the
+        # pr_opened backfill.
+        self.pr_created_ats = {}
         # issue_number -> list of comment dicts ({body, user.login,
         # author_association, created_at}); tests set entries to steer
         # approval resolution.
@@ -182,6 +194,10 @@ class NullGitHubClient:
     async def latest_pr_comment(self, pr_url: str):
         comments = self.pr_comments.get(pr_url, [])
         return comments[-1].get("body") if comments else None
+
+    async def pr_created_at(self, pr_url: str):
+        self.events.append(("pr_created_at", pr_url))
+        return self.pr_created_ats.get(pr_url)
 
     async def pr_status(self, pr_url: str) -> str:
         self.events.append(("pr_check", pr_url))

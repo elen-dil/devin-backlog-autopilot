@@ -116,6 +116,50 @@ def test_approval_without_comment_is_blocked(settings, components):
     assert "decision" in ask.lower()
 
 
+def test_service_result_comment_is_not_a_decision(settings, components):
+    """The service posts its result comment under the maintainer's token,
+    so it arrives with OWNER association one second after finished_at.
+    Without the template-prefix guard the approval flow would adopt the
+    service's own comment as the reviewer decision."""
+    store, devin, github = components
+    service = AutopilotService(settings, store, devin, github)
+    previous = _seed_needs_human(service, devin, 7)
+
+    github.issue_comments[7] = [
+        {
+            "body": (
+                "Autopilot finished: needs human review\n"
+                "Session: https://app.devin.ai/sessions/x\n"
+                "Blockers: requires a major-version bump"
+            ),
+            "user": {"login": "maintainer"},
+            "author_association": "OWNER",
+            # The result comment lands just after finished_at, so the
+            # post-finish window filter alone cannot exclude it.
+            "created_at": "2999-01-01T00:00:00Z",
+        }
+    ]
+    run(service.enqueue_issue(7, "t", "https://x/7", "b", "test", approved=True))
+    run(service.dispatch_tick())
+
+    retry = store.by_state("failed")[-1]
+    assert retry["issue_number"] == 7
+    assert "no reviewer decision" in (retry["error"] or "")
+    assert len(devin.prompts) == 1  # only the seed run started a session
+
+
+def test_service_prefixes_cover_every_writer():
+    from app.service import SERVICE_COMMENT_PREFIXES
+
+    for body in (
+        "Devin session started: https://app.devin.ai/sessions/x",
+        "Autopilot finished: fix proposed",
+        "Autopilot could not start a Devin session: `boom`",
+        "Autopilot: `devin-approved` is set, but no reviewer decision",
+    ):
+        assert body.startswith(SERVICE_COMMENT_PREFIXES), body
+
+
 def test_non_write_comment_does_not_count(settings, components):
     store, devin, github = components
     service = AutopilotService(settings, store, devin, github)
