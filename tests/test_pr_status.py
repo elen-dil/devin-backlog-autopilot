@@ -128,9 +128,10 @@ def test_rejected_counts_in_metrics(settings):
 
     m = compute_metrics(runs, settings)
     assert m["issues_completed"] == 2
-    assert m["pr_rate"] == 1.0  # both finished runs produced a PR
-    assert m["merge_rate"] == 0.5  # 1 merged / 2 PRs
-    assert m["resolution_rate"] == 0.5  # 1 merged / 2 finished
+    # 1 merged + 1 rejected decided; a pr_open run would be excluded
+    # since nobody has ruled on it yet.
+    assert m["prs_decided"] == 2
+    assert m["pr_acceptance_rate"] == 0.5
     assert m["funnel"]["sessions"] == 2
     assert m["funnel"]["prs"] == 2
     assert m["funnel"]["rejected"] == 1

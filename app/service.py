@@ -985,20 +985,43 @@ def compute_metrics(runs, settings, events=None) -> dict:
     total = len(runs)
     merged = by_state.get("merged", 0)
     rejected = by_state.get("rejected", 0)
-    pr_opened = merged + by_state.get("pr_open", 0) + rejected
+    failed = by_state.get("failed", 0)
     finished = (
         merged
         + by_state.get("pr_open", 0)
         + rejected
         + by_state.get("needs_human", 0)
-        + by_state.get("failed", 0)
+        + failed
     )
-    # Decided runs carry a final outcome; pr_open runs still await merge.
-    decided = (
-        merged
-        + rejected
-        + by_state.get("needs_human", 0)
-        + by_state.get("failed", 0)
+
+    # Issue-level metrics key on each issue's latest run — max id, the
+    # ordering issues_index uses (a missing id sorts as 0) — so a
+    # retried issue counts once by where it ended, not once per attempt.
+    by_issue = {}
+    for run in runs:
+        by_issue.setdefault(run["issue_number"], []).append(run)
+    latest = {
+        n: sorted(rs, key=lambda r: r.get("id") or 0)[-1]
+        for n, rs in by_issue.items()
+    }
+    issues_attempted = len(by_issue)
+    issues_merged = sum(1 for r in latest.values() if r["state"] == "merged")
+    policy_stops_awaiting = sum(
+        1 for r in latest.values() if r["state"] == "needs_human"
+    )
+    # A stop is waived when an approved retry ran later on the same
+    # issue; an approved run with no earlier needs_human run on its
+    # issue is not a waiver.
+    policy_stops_waived = sum(
+        1
+        for rs in by_issue.values()
+        for r in rs
+        if r.get("approved")
+        and any(
+            o["state"] == "needs_human"
+            and (o.get("id") or 0) < (r.get("id") or 0)
+            for o in rs
+        )
     )
 
     # started_at -> finished_at: active session time.
@@ -1049,15 +1072,6 @@ def compute_metrics(runs, settings, events=None) -> dict:
     # time (started_at -> finished_at) is the reliable cost proxy.
     total_session_minutes = sum(latencies)
 
-    # first_pass_approval_rate: of merged runs, the fraction that merged
-    # without a single review round.
-    merged_runs = [r for r in runs if r["state"] == "merged"]
-    first_pass_approval = (
-        sum(1 for r in merged_runs if not (r.get("review_rounds") or 0))
-        / len(merged_runs)
-        if merged_runs
-        else None
-    )
     # Median minutes from feedback posted to Devin's addressing reply,
     # parsed out of the feedback_addressed event details.
     address_minutes = []
@@ -1100,21 +1114,31 @@ def compute_metrics(runs, settings, events=None) -> dict:
             "rejected": rejected,
         },
         "issues_completed": finished,
-        # pr_rate: fraction of finished runs that produced a PR.
-        "pr_rate": pr_opened / finished if finished else 0.0,
-        # merge_rate: of the PRs Devin opened, how many were merged.
-        "merge_rate": merged / pr_opened if pr_opened else 0.0,
-        # decided runs have a final outcome; pr_open runs are still
-        # awaiting merge and stay out of both rate denominators.
-        # resolution_rate: of decided runs, how many shipped a merged fix.
-        "resolution_rate": merged / decided if decided else 0.0,
-        # human_intervention_rate: of decided runs, how many ended waiting
-        # on a human decision or with a rejected PR.
-        "human_intervention_rate": (
-            (by_state.get("needs_human", 0) + rejected) / decided
-            if decided
-            else 0.0
+        # fix_rate: of the issues attempted, the fraction whose latest
+        # run merged. Retries re-attempt the same issue without
+        # diluting the denominator.
+        "issues_attempted": issues_attempted,
+        "issues_merged": issues_merged,
+        "fix_rate": (
+            issues_merged / issues_attempted if issues_attempted else 0.0
         ),
+        # pr_acceptance_rate: of the PRs a human ruled on, how many
+        # merged. pr_open runs are undecided and stay out of the
+        # denominator.
+        "prs_decided": merged + rejected,
+        "pr_acceptance_rate": (
+            merged / (merged + rejected) if merged + rejected else 0.0
+        ),
+        # Policy stops count runs: every needs_human is a stop. Waived
+        # stops were picked back up by an approved retry; awaiting
+        # stops are issues still parked on a needs_human latest run.
+        "policy_stops": by_state.get("needs_human", 0),
+        "policy_stops_waived": policy_stops_waived,
+        "policy_stops_awaiting": policy_stops_awaiting,
+        # failed_rate is over all runs: a crashed session is a cost
+        # whether or not it ever reached a decision.
+        "failed_runs": failed,
+        "failed_rate": failed / total if total else 0.0,
         "median_latency_minutes": median_latency,
         "median_label_to_result_minutes": median_label_to_result,
         "median_label_to_pr_minutes": median_label_to_pr,
@@ -1137,7 +1161,6 @@ def compute_metrics(runs, settings, events=None) -> dict:
         "session_minutes_per_merged_fix": (
             (total_session_minutes / merged) if merged else None
         ),
-        "first_pass_approval_rate": first_pass_approval,
         "median_feedback_address_minutes": (
             statistics.median(address_minutes) if address_minutes else None
         ),
