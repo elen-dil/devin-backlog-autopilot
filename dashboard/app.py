@@ -682,7 +682,7 @@ def render_kpis(metrics, runs, issues):
     # key= lands as a .st-key-kpi_grid class; the CSS block wraps this row
     # cleanly (4-across -> 2x2 -> stacked) as the viewport narrows.
     with st.container(key="kpi_grid"):
-        status_col, eff_col, thr_col, cost_col = st.columns([4, 4, 3, 4])
+        status_col, eff_col, thr_col, cost_col = st.columns([5, 4, 3, 4])
 
         with status_col:
             group_label("Status")
