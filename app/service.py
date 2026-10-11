@@ -43,6 +43,10 @@ _PR_RESOLUTIONS = {
 # author_association values on issue comments that imply write access.
 REVIEWER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
+# PR review states that count as human feedback. APPROVED is tracked
+# separately: it emits pr_approved, not review_feedback.
+FEEDBACK_REVIEW_STATES = {"CHANGES_REQUESTED", "COMMENTED"}
+
 
 def session_is_terminal(status: str, status_detail) -> bool:
     """Terminal = exit/error/suspended, or running with a finished/waiting detail."""
@@ -69,6 +73,32 @@ def _parse_ts(value):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _is_bot(user) -> bool:
+    user = user or {}
+    return user.get("type") == "Bot" or (user.get("login") or "").endswith(
+        "[bot]"
+    )
+
+
+def _is_devin_bot(user) -> bool:
+    return _is_bot(user) and "devin" in (user.get("login") or "").lower()
+
+
+def _trusted_actor(item) -> bool:
+    """Write-association human actor — the same bar approval decisions
+    already use on issue comments."""
+    return (
+        item.get("author_association") in REVIEWER_ASSOCIATIONS
+        and not _is_bot(item.get("user"))
+    )
+
+
+def _has_aside(body) -> bool:
+    """Comments tagged "(aside)" are conversational, not actionable
+    feedback."""
+    return "(aside)" in (body or "").lower()
 
 
 class AutopilotService:
@@ -540,6 +570,175 @@ class AutopilotService:
                     "terminate failed for session %s", run["session_id"]
                 )
 
+    async def _review_scan(self, run: dict) -> None:
+        """One pass over a run's PR: record human review feedback and
+        approvals as events, match Devin's replies to each feedback item,
+        and roll the outcome up onto the run. Safe to re-run — every event
+        dedupes on the GitHub object's external_id."""
+        pr_url = run["pr_url"]
+        if not pr_url:
+            return
+        reviews = await self._github.list_pr_reviews(pr_url)
+        review_comments = await self._github.list_pr_review_comments(pr_url)
+        issue_comments = await self._github.list_pr_issue_comments(pr_url)
+        commits = await self._github.list_pr_commits(pr_url)
+
+        def _item(gh_id, obj, ts_key):
+            return {
+                "gh_id": gh_id,
+                "author": (obj.get("user") or {}).get("login"),
+                "url": obj.get("html_url"),
+                "excerpt": (obj.get("body") or "")[:200],
+                "ts": _parse_ts(obj.get(ts_key)),
+            }
+
+        review_ids = {r.get("id") for r in reviews if r.get("id") is not None}
+        feedback = []
+        approvals = []
+        for r in reviews:
+            if not _trusted_actor(r) or _has_aside(r.get("body")):
+                continue
+            if r.get("state") in FEEDBACK_REVIEW_STATES:
+                item = _item(f"review:{r.get('id')}", r, "submitted_at")
+                if item["ts"] is not None:
+                    feedback.append(item)
+            elif r.get("state") == "APPROVED":
+                item = _item(f"approval:{r.get('id')}", r, "submitted_at")
+                if item["ts"] is not None:
+                    approvals.append(item)
+        # Inline review comments that belong to a fetched review fold into
+        # that review; only orphaned ones count as feedback on their own.
+        for c in review_comments:
+            if c.get("pull_request_review_id") in review_ids:
+                continue
+            if not _trusted_actor(c) or _has_aside(c.get("body")):
+                continue
+            item = _item(f"rcomment:{c.get('id')}", c, "created_at")
+            if item["ts"] is not None:
+                feedback.append(item)
+        for c in issue_comments:
+            if not _trusted_actor(c) or _has_aside(c.get("body")):
+                continue
+            item = _item(f"comment:{c.get('id')}", c, "created_at")
+            if item["ts"] is not None:
+                feedback.append(item)
+
+        # A feedback item is addressed once Devin replies after it; no
+        # commit is required (the reply itself is the round boundary).
+        devin_replies = []
+        for kind, c in (
+            [("issue", c) for c in issue_comments]
+            + [("review", c) for c in review_comments]
+        ):
+            if not _is_devin_bot(c.get("user")):
+                continue
+            ts = _parse_ts(c.get("created_at"))
+            if ts is None:
+                continue
+            devin_replies.append(
+                {
+                    "key": f"{kind}:{c.get('id')}",
+                    "ts": ts,
+                    "url": c.get("html_url"),
+                }
+            )
+        devin_replies.sort(key=lambda d: d["ts"])
+
+        commit_list = []
+        for c in commits:
+            detail = c.get("commit") or {}
+            ts = _parse_ts(
+                (detail.get("committer") or {}).get("date")
+                or (detail.get("author") or {}).get("date")
+            )
+            if ts is None or not c.get("sha"):
+                continue
+            commit_list.append({"sha": c["sha"], "ts": ts})
+
+        feedback.sort(key=lambda f: f["ts"])
+        approvals.sort(key=lambda a: a["ts"])
+        addressing = {}  # reply key -> reply; one reply can close many items
+        round_shas = set()
+        unaddressed = []
+        for item in feedback:
+            self._store.add_event(
+                run["id"],
+                "review_feedback",
+                json.dumps(
+                    {
+                        "id": item["gh_id"],
+                        "author": item["author"],
+                        "url": item["url"],
+                        "excerpt": item["excerpt"],
+                    }
+                ),
+                external_id=item["gh_id"],
+            )
+            reply = next(
+                (d for d in devin_replies if d["ts"] > item["ts"]), None
+            )
+            if reply is None:
+                unaddressed.append(item)
+                continue
+            addressing[reply["key"]] = reply
+            shas = sorted(
+                {
+                    c["sha"]
+                    for c in commit_list
+                    if item["ts"] < c["ts"] <= reply["ts"]
+                }
+            )
+            round_shas.update(shas)
+            minutes = round(
+                (reply["ts"] - item["ts"]).total_seconds() / 60, 1
+            )
+            self._store.add_event(
+                run["id"],
+                "feedback_addressed",
+                json.dumps(
+                    {
+                        "id": item["gh_id"],
+                        "reply_url": reply["url"],
+                        "minutes": minutes,
+                        "commits": shas,
+                    }
+                ),
+                external_id=f"addr:{item['gh_id']}",
+            )
+        for item in approvals:
+            self._store.add_event(
+                run["id"],
+                "pr_approved",
+                json.dumps(
+                    {
+                        "id": item["gh_id"],
+                        "author": item["author"],
+                        "url": item["url"],
+                    }
+                ),
+                external_id=item["gh_id"],
+            )
+
+        latest_approval = max((a["ts"] for a in approvals), default=None)
+        if run["state"] == "rejected":
+            review_status = "rejected"
+        elif unaddressed:
+            review_status = "changes_requested"
+        elif latest_approval is not None and all(
+            f["ts"] <= latest_approval for f in feedback
+        ):
+            review_status = "approved"
+        elif addressing:
+            review_status = "addressed"
+        else:
+            review_status = "none"
+        self._store.update(
+            run["id"],
+            review_rounds=len(addressing),
+            review_commits=len(round_shas),
+            review_status=review_status,
+        )
+
     async def merge_check_tick(self) -> None:
         """Resolve pr_open runs whose PR reached a terminal state on GitHub:
         merged -> state 'merged', closed-unmerged -> state 'rejected'. Also
@@ -548,6 +747,14 @@ class AutopilotService:
         for run in self._store.by_state("pr_open"):
             if not run["pr_url"]:
                 continue
+            try:
+                # Scan before resolving so a PR that merged or closed since
+                # the last tick still gets its final review state captured.
+                await self._review_scan(run)
+            except Exception:
+                # Review tracking is best-effort; it must never block a
+                # merge/reject resolution.
+                logger.exception("review scan failed for run %s", run["id"])
             try:
                 resolution = _PR_RESOLUTIONS.get(
                     await self._github.pr_status(run["pr_url"])
@@ -579,14 +786,29 @@ class AutopilotService:
                     run["issue_number"],
                     new_label,
                 )
-                self._store.update(
-                    run["id"], state=state, rejection_reason=rejection_reason
-                )
+                update = {"state": state, "rejection_reason": rejection_reason}
+                if state == "rejected":
+                    update["review_status"] = "rejected"
+                self._store.update(run["id"], **update)
                 self._store.add_event(run["id"], event, run["pr_url"])
             except Exception:
                 # One poisoned run must not starve the others; the tick
                 # retries it next pass.
                 logger.exception("merge check failed for run %s", run["id"])
+
+    async def review_backfill_tick(self) -> None:
+        """Backfill review state for every run that has a PR, whatever its
+        state. Runs once at startup: it picks up feedback posted while the
+        service was down and computes review_rounds for already-merged
+        runs, which the periodic merge_check_tick never rescans."""
+        for run in self._store.all():
+            if not run["pr_url"]:
+                continue
+            try:
+                await self._review_scan(run)
+            except Exception:
+                # One poisoned run must not starve the others.
+                logger.exception("review backfill failed for run %s", run["id"])
 
     async def acu_backfill_tick(self) -> None:
         """Re-poll recently-finalized sessions for ACU usage. Usage posts to
@@ -656,7 +878,7 @@ def _minutes_between(runs, start_key: str, end_key: str):
     ]
 
 
-def compute_metrics(runs, settings) -> dict:
+def compute_metrics(runs, settings, events=None) -> dict:
     by_state = {}
     for run in runs:
         by_state[run["state"]] = by_state.get(run["state"], 0) + 1
@@ -707,6 +929,29 @@ def compute_metrics(runs, settings) -> dict:
     # Devin doesn't always meter per-session usage, so session wall-clock
     # time (started_at -> finished_at) is the reliable cost proxy.
     total_session_minutes = sum(latencies)
+
+    # first_pass_approval_rate: of merged runs, the fraction that merged
+    # without a single review round.
+    merged_runs = [r for r in runs if r["state"] == "merged"]
+    first_pass_approval = (
+        sum(1 for r in merged_runs if not (r.get("review_rounds") or 0))
+        / len(merged_runs)
+        if merged_runs
+        else None
+    )
+    # Median minutes from feedback posted to Devin's addressing reply,
+    # parsed out of the feedback_addressed event details.
+    address_minutes = []
+    for e in events or []:
+        if e.get("event") != "feedback_addressed":
+            continue
+        try:
+            detail = json.loads(e.get("detail") or "")
+        except ValueError:
+            continue
+        minutes = detail.get("minutes")
+        if isinstance(minutes, (int, float)):
+            address_minutes.append(minutes)
 
     return {
         "total_runs": total,
@@ -766,6 +1011,10 @@ def compute_metrics(runs, settings) -> dict:
         ),
         "session_minutes_per_merged_fix": (
             (total_session_minutes / merged) if merged else None
+        ),
+        "first_pass_approval_rate": first_pass_approval,
+        "median_feedback_address_minutes": (
+            statistics.median(address_minutes) if address_minutes else None
         ),
     }
 

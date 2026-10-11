@@ -112,10 +112,10 @@ ACU_HELP = (
 TABLE_ROW_HEIGHT = 35
 TABLE_MAX_ROWS = 8
 # Column widths for the runs table (Issue, Status, Approved, Date,
-# Attempts, Time, ACUs, Session, PR, Details). The hover-tooltip script
-# in render_overview() needs the same geometry, so both read these
-# values.
-TABLE_COL_WIDTHS = [260, 100, 70, 60, 65, 65, 60, 70, 50, 70]
+# Attempts, Time, ACUs, Session, PR, Review, Details). The hover-tooltip
+# script in render_overview() needs the same geometry, so both read
+# these values.
+TABLE_COL_WIDTHS = [260, 100, 70, 60, 65, 65, 60, 70, 50, 130, 70]
 
 # Auto-refresh cadence for the dashboard fragment. An invalid or
 # non-positive value falls back to 10s rather than crashing the page.
@@ -201,6 +201,30 @@ def acu_display(run) -> str:
     if run.get("finished_at") and not acus:
         return "pending"
     return "—" if acus is None else f"{acus:.1f}"
+
+
+def review_display(run) -> str:
+    """Review-column cell text: review state plus round/commit counts."""
+    rounds = run.get("review_rounds") or 0
+    commits = run.get("review_commits") or 0
+    status = run.get("review_status")
+    round_txt = f"{rounds} round{'s' if rounds != 1 else ''}"
+    commit_txt = f"{commits} commit{'s' if commits != 1 else ''}"
+    if run.get("state") == "rejected" or status == "rejected":
+        return "Rejected" if rounds == 0 else f"Rejected ({round_txt})"
+    if status == "changes_requested":
+        return "Changes requested"
+    if status == "addressed":
+        return f"Addressed ({round_txt}, {commit_txt})"
+    if status == "approved":
+        return (
+            "Approved first pass"
+            if rounds == 0
+            else f"Approved ({round_txt})"
+        )
+    if run.get("state") == "pr_open":
+        return "Pending review"
+    return "—"
 
 
 def session_minutes(run):
@@ -356,6 +380,46 @@ def friendly_event(event):
 
     if name == "error":
         return f"Error: {detail or 'unknown'}", True
+
+    if name == "review_feedback":
+        try:
+            info = json.loads(detail or "{}")
+        except ValueError:
+            info = {}
+        author = info.get("author") or "unknown"
+        excerpt = re.sub(r"\s+", " ", str(info.get("excerpt") or "")).strip()
+        if len(excerpt) > 140:
+            excerpt = excerpt[:139].rstrip() + "…"
+        if excerpt:
+            return f"Review feedback from {author}: {excerpt}", False
+        return f"Review feedback from {author}", False
+
+    if name == "feedback_addressed":
+        try:
+            info = json.loads(detail or "{}")
+        except ValueError:
+            info = {}
+        text = "Feedback addressed — Devin replied"
+        minutes = info.get("minutes")
+        if isinstance(minutes, (int, float)):
+            text = f"{text} {minutes:g} min later"
+        commits = info.get("commits") or []
+        if commits:
+            count = len(commits)
+            text = f"{text}, {count} commit{'s' if count != 1 else ''}"
+        if info.get("reply_url"):
+            text = f"{text} ([reply]({info['reply_url']}))"
+        return text, False
+
+    if name == "pr_approved":
+        try:
+            info = json.loads(detail or "{}")
+        except ValueError:
+            info = {}
+        text = f"PR approved by {info.get('author') or 'unknown'}"
+        if info.get("url"):
+            text = f"{text} ([review]({info['url']}))"
+        return text, False
 
     text = pretty_event(name)
     if detail:
@@ -534,7 +598,7 @@ def render_kpis(metrics, runs):
 
         with eff_col:
             group_label("Effectiveness")
-            res_col, merge_col, human_col = st.columns(3)
+            res_col, merge_col, human_col, fpa_col = st.columns(4)
             res_col.markdown(
                 _kpi_tile(
                     "Resolution rate",
@@ -563,16 +627,40 @@ def render_kpis(metrics, runs):
                 ),
                 unsafe_allow_html=True,
             )
+            fpa_col.markdown(
+                _kpi_tile(
+                    "First-pass approval",
+                    fmt_pct(metrics.get("first_pass_approval_rate")),
+                    "Share of merged PRs that merged with zero human "
+                    "review rounds. Formula: merged PRs with 0 review "
+                    "rounds ÷ merged PRs. Comments containing '(aside)' "
+                    "don't count as review rounds.",
+                ),
+                unsafe_allow_html=True,
+            )
 
         with thr_col:
             group_label("Throughput")
-            st.markdown(
+            pr_col, addr_col = st.columns(2)
+            pr_col.markdown(
                 _kpi_tile(
                     "Median time to PR",
                     fmt_minutes(metrics.get("median_label_to_pr_minutes")),
                     "Median minutes from an issue being labeled to its PR "
                     "opening. Formula: median(PR opened time − labeled "
                     "time).",
+                ),
+                unsafe_allow_html=True,
+            )
+            addr_col.markdown(
+                _kpi_tile(
+                    "Median time to address",
+                    fmt_minutes(
+                        metrics.get("median_feedback_address_minutes")
+                    ),
+                    "Median minutes from a reviewer's feedback to "
+                    "Devin's reply marking it addressed. Formula: median "
+                    "over feedback_addressed events.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -702,6 +790,7 @@ def render_runs_table(issues):
                 "ACUs": acu_display(latest),
                 "Session": latest.get("session_url"),
                 "PR": latest.get("pr_url"),
+                "Review": review_display(latest),
                 "Details": "View",
             }
             for issue in ordered
@@ -736,8 +825,9 @@ def render_runs_table(issues):
             "PR": st.column_config.LinkColumn(
                 "PR", display_text="Open", width=TABLE_COL_WIDTHS[8]
             ),
+            "Review": st.column_config.TextColumn(width=TABLE_COL_WIDTHS[9]),
             "Details": st.column_config.ButtonColumn(
-                "Details", key="run_detail_click", width=TABLE_COL_WIDTHS[9]
+                "Details", key="run_detail_click", width=TABLE_COL_WIDTHS[10]
             ),
         },
         height=height,

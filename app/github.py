@@ -5,6 +5,13 @@ import httpx
 API_BASE = "https://api.github.com"
 
 
+def _pr_parts(pr_url: str):
+    """(owner, repo, number) parsed from a PR URL like
+    https://github.com/{owner}/{repo}/pull/{n}."""
+    parts = pr_url.rstrip("/").split("/")
+    return parts[-4], parts[-3], parts[-1]
+
+
 class GitHubClient:
     def __init__(self, repo: str, token: str, http: httpx.AsyncClient | None = None):
         self._repo = repo
@@ -67,8 +74,7 @@ class GitHubClient:
     async def latest_pr_comment(self, pr_url: str):
         """Body of the most recent comment on a PR, or None. PRs share the
         issue comments endpoint; review comments on diffs are not fetched."""
-        parts = pr_url.rstrip("/").split("/")
-        owner, repo, number = parts[-4], parts[-3], parts[-1]
+        owner, repo, number = _pr_parts(pr_url)
         resp = await self._http.get(
             f"/repos/{owner}/{repo}/issues/{number}/comments",
             params={"per_page": 100},
@@ -81,9 +87,7 @@ class GitHubClient:
         return comments[-1].get("body")
 
     async def pr_status(self, pr_url: str) -> str:
-        # pr_url looks like https://github.com/{owner}/{repo}/pull/{n}
-        parts = pr_url.rstrip("/").split("/")
-        owner, repo, number = parts[-4], parts[-3], parts[-1]
+        owner, repo, number = _pr_parts(pr_url)
         resp = await self._http.get(f"/repos/{owner}/{repo}/pulls/{number}")
         if resp.status_code != 200:
             # A failed fetch means "keep waiting", same as the old False:
@@ -93,6 +97,42 @@ class GitHubClient:
         if pr.get("merged_at"):
             return "merged"
         return "closed" if pr.get("state") == "closed" else "open"
+
+    async def list_pr_reviews(self, pr_url: str):
+        owner, repo, number = _pr_parts(pr_url)
+        resp = await self._http.get(
+            f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+            params={"per_page": 100},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def list_pr_review_comments(self, pr_url: str):
+        owner, repo, number = _pr_parts(pr_url)
+        resp = await self._http.get(
+            f"/repos/{owner}/{repo}/pulls/{number}/comments",
+            params={"per_page": 100},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def list_pr_issue_comments(self, pr_url: str):
+        owner, repo, number = _pr_parts(pr_url)
+        resp = await self._http.get(
+            f"/repos/{owner}/{repo}/issues/{number}/comments",
+            params={"per_page": 100},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def list_pr_commits(self, pr_url: str):
+        owner, repo, number = _pr_parts(pr_url)
+        resp = await self._http.get(
+            f"/repos/{owner}/{repo}/pulls/{number}/commits",
+            params={"per_page": 100},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 class NullGitHubClient:
@@ -111,8 +151,15 @@ class NullGitHubClient:
         # label.name and actor.login.
         self.issue_events = {}
         # pr_url -> list of comment dicts ({body}); the last one's body is
-        # stored as rejection_reason.
+        # stored as rejection_reason. The same dict backs
+        # list_pr_issue_comments, so entries may also carry the full
+        # comment shape ({id, user, author_association, created_at}).
         self.pr_comments = {}
+        # pr_url -> list of review dicts, inline review-comment dicts, and
+        # commit dicts; tests set entries to steer _review_scan.
+        self.pr_reviews = {}
+        self.pr_review_comments = {}
+        self.pr_commits = {}
 
     async def list_labeled_issues(self, label: str):
         return []
@@ -139,3 +186,15 @@ class NullGitHubClient:
     async def pr_status(self, pr_url: str) -> str:
         self.events.append(("pr_check", pr_url))
         return self.pr_statuses.get(pr_url, "open")
+
+    async def list_pr_reviews(self, pr_url: str):
+        return list(self.pr_reviews.get(pr_url, []))
+
+    async def list_pr_review_comments(self, pr_url: str):
+        return list(self.pr_review_comments.get(pr_url, []))
+
+    async def list_pr_issue_comments(self, pr_url: str):
+        return list(self.pr_comments.get(pr_url, []))
+
+    async def list_pr_commits(self, pr_url: str):
+        return list(self.pr_commits.get(pr_url, []))

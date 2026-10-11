@@ -208,6 +208,8 @@ def test_metrics_hand_computed(settings, components):
         "total_session_minutes",
         "session_minutes_per_run",
         "session_minutes_per_merged_fix",
+        "first_pass_approval_rate",
+        "median_feedback_address_minutes",
     }
     assert m["total_runs"] == 6
     assert m["by_state"] == {

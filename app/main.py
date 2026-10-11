@@ -62,6 +62,13 @@ def create_app(
                 await service.merge_check_tick()
             except Exception:
                 logger.exception("startup PR status backfill failed")
+            try:
+                # Backfill: review state for PRs reviewed while the service
+                # was down, plus review_rounds for already-merged runs,
+                # which the periodic merge tick never rescans.
+                await service.review_backfill_tick()
+            except Exception:
+                logger.exception("startup review backfill failed")
             tasks = [
                 asyncio.create_task(_loop(service.dispatch_tick, settings.dispatch_seconds)),
                 asyncio.create_task(
@@ -119,7 +126,9 @@ def create_app(
     @app.get("/api/v1/metrics")
     async def metrics():
         return compute_metrics(
-            store.all(include_simulated=settings.simulate), settings
+            store.all(include_simulated=settings.simulate),
+            settings,
+            events=store.all_events(),
         )
 
     @app.get("/healthz")

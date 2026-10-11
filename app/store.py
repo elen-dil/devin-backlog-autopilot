@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS runs (
     is_simulated INTEGER NOT NULL DEFAULT 0,
     approved INTEGER NOT NULL DEFAULT 0,
     rejection_reason TEXT,
+    review_rounds INTEGER,
+    review_status TEXT,
+    review_commits INTEGER,
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT
@@ -51,9 +54,14 @@ CREATE TABLE IF NOT EXISTS run_events (
     run_id INTEGER NOT NULL,
     timestamp TEXT NOT NULL,
     event TEXT NOT NULL,
-    detail TEXT
+    detail TEXT,
+    external_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events (run_id);
+-- external_id dedupes events keyed to a GitHub object (a review, a
+-- comment) so re-scanning a PR never records the same thing twice.
+CREATE UNIQUE INDEX IF NOT EXISTS run_events_external_id
+    ON run_events (run_id, external_id) WHERE external_id IS NOT NULL;
 """
 
 
@@ -70,6 +78,19 @@ class RunStore:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            # run_events rows predate external_id; the column must exist
+            # before _SCHEMA's partial unique index can be created on it.
+            event_cols = {
+                row["name"]
+                for row in self._conn.execute(
+                    "PRAGMA table_info(run_events)"
+                ).fetchall()
+            }
+            if event_cols and "external_id" not in event_cols:
+                self._conn.execute(
+                    "ALTER TABLE run_events ADD COLUMN external_id TEXT"
+                )
+                self._conn.commit()
             self._conn.executescript(_SCHEMA)
             # Databases created before is_simulated existed get it here.
             cols = {
@@ -108,6 +129,33 @@ class RunStore:
                 # the pr_merged run event records the timestamp now.
                 self._conn.execute("ALTER TABLE runs DROP COLUMN merged_at")
                 self._conn.commit()
+            if "review_rounds" not in cols:
+                # Review tracking rollup: distinct Devin replies that
+                # addressed human feedback on the run's PR.
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN review_rounds INTEGER"
+                )
+                self._conn.commit()
+            if "review_status" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN review_status TEXT"
+                )
+                self._conn.commit()
+            if "review_commits" not in cols:
+                # Distinct commit shas pushed inside feedback->reply
+                # windows.
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN review_commits INTEGER"
+                )
+                self._conn.commit()
+            # Pre-existing DBs get the dedupe index here; the column
+            # migration above runs first so the index always finds it.
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS run_events_external_id"
+                " ON run_events (run_id, external_id)"
+                " WHERE external_id IS NOT NULL"
+            )
+            self._conn.commit()
 
     def enqueue(
         self,
@@ -190,14 +238,32 @@ class RunStore:
         rows = self._conn.execute(f"{query} ORDER BY id DESC").fetchall()
         return [dict(r) for r in rows]
 
-    def add_event(self, run_id: int, event: str, detail: str | None = None) -> None:
+    def add_event(
+        self,
+        run_id: int,
+        event: str,
+        detail: str | None = None,
+        external_id: str | None = None,
+    ) -> None:
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO run_events (run_id, timestamp, event, detail)"
-                " VALUES (?, ?, ?, ?)",
-                (run_id, _now(), event, detail),
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    "INSERT INTO run_events"
+                    " (run_id, timestamp, event, detail, external_id)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (run_id, _now(), event, detail, external_id),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                # A repeated external_id (the same GitHub object seen on a
+                # later scan) is a dedupe skip, not a failure.
+                return
+
+    def all_events(self):
+        rows = self._conn.execute(
+            "SELECT * FROM run_events ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def events_for(self, run_id: int):
         rows = self._conn.execute(
