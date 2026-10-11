@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS runs (
     summary TEXT,
     tests_run INTEGER,
     tests_passed INTEGER,
+    tests_failed INTEGER,
     acus REAL,
     output_json TEXT,
     error TEXT,
@@ -128,6 +129,13 @@ class RunStore:
                 # merged_at was written on merge but read by nothing;
                 # the pr_merged run event records the timestamp now.
                 self._conn.execute("ALTER TABLE runs DROP COLUMN merged_at")
+                self._conn.commit()
+            if "tests_failed" not in cols:
+                # Devin reports tests_run as the collected count (passed +
+                # skipped + xfailed), so failures need their own field.
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN tests_failed INTEGER"
+                )
                 self._conn.commit()
             if "review_rounds" not in cols:
                 # Review tracking rollup: distinct Devin replies that
@@ -244,14 +252,17 @@ class RunStore:
         event: str,
         detail: str | None = None,
         external_id: str | None = None,
+        timestamp: str | None = None,
     ) -> None:
+        # timestamp (ISO 8601 UTC) defaults to now; backfilled events pass
+        # the real time of the thing they record (e.g. a PR's created_at).
         with self._lock:
             try:
                 self._conn.execute(
                     "INSERT INTO run_events"
                     " (run_id, timestamp, event, detail, external_id)"
                     " VALUES (?, ?, ?, ?, ?)",
-                    (run_id, _now(), event, detail, external_id),
+                    (run_id, timestamp or _now(), event, detail, external_id),
                 )
                 self._conn.commit()
             except sqlite3.IntegrityError:

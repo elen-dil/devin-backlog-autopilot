@@ -44,7 +44,8 @@ opens a PR, while a small dashboard tracks throughput, success rates, and cost.
      merge check every 5 min ──▶ state: merged (label: devin-merged)
                                    or rejected (label: devin-pr-rejected)
 
-Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs, GET /api/v1/metrics
+Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs,
+                                       /api/v1/issues, /api/v1/metrics
 ```
 
 ## Design decisions
@@ -75,6 +76,18 @@ Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs, GET /api/v1/m
   finished, bakes it into the prompt as a waiver of the cited escalation
   rules, and removes `devin-approved` when the run finalizes (single-use).
   With no qualifying comment the run fails and asks for the decision.
+  The service's own issue comments ("Devin session started:", "Autopilot
+  finished:", ...) can never count as a decision: they post under the
+  maintainer's token and so carry a write-access author_association, so the
+  approval check filters them by prefix.
+- **Retries clean the board.** Before a new session is created the run
+  strips the issue's stale outcome labels (`devin-needs-human`,
+  `devin-pr-rejected`), so GitHub shows the fresh attempt, not the old
+  result.
+- **Time-to-PR anchors on the PR, not the session.** The session poller
+  records a `pr_opened` run event the moment a session reports a pull
+  request and stores `pr_url` immediately. Runs that predate the event get
+  it backfilled at startup from the PR's GitHub `created_at`.
 - **Guardrails.** `MAX_ACU_PER_SESSION` caps spend per issue,
   `MAX_CONCURRENT_SESSIONS` caps parallelism, and a session that fails to start
   gets its trigger label removed so the poller can't loop on it.
@@ -124,22 +137,30 @@ repo and last-refresh time. Everything is designed to fit one laptop screen.
 
 An always-visible KPI row groups the headline numbers:
 
-- **Status** — running and queued counts in one tile.
-- **Effectiveness** — *resolution rate* (merged / finished runs) and *merge
-  rate* (merged / PRs opened).
-- **Throughput** — *median time to PR* (labeled to PR opened).
-- **Cost** — total ACUs and *ACUs per merged fix* (total ACUs / merged fixes,
-  including compute spent on runs that did not merge). All spend is tracked in
-  ACUs; there is no dollar pricing.
+- **Status** — an issue-level headline (issues by latest state: merged,
+  awaiting merge, needs human, failed) plus running and queued run counts.
+- **Effectiveness** — *resolution rate* (merged / decided runs, excluding
+  PRs still awaiting merge), *merge rate* (merged / PRs opened),
+  *escalated to human*, and *merged without changes*.
+- **Throughput** — *median time to PR* (issue enqueued to PR opened,
+  anchored on the `pr_opened` event) and *median time to address* review
+  feedback.
+- **Cost** — *session minutes* (total Devin session time across finished
+  runs) and *minutes per merged fix* (including time spent on runs that
+  did not merge). ACUs are shown where Devin reports them; there is no
+  dollar pricing.
 
 Below the KPIs, three tabs:
 
-- **Overview** — a compact runs table (issue, status, time to result, ACUs,
-  session/PR links) plus a pipeline funnel (sessions -> PRs -> merged |
-  rejected) and the list of blockers from needs_human runs.
-- **Trends** — cumulative completed-over-time chart and outcome breakdown.
-- **Cost** — a per-run ACU bar chart with the `MAX_ACU_PER_SESSION` cap as a
-  reference line and at-cap runs highlighted.
+- **Overview** — a compact runs table (Issue, Status, Approved, Date,
+  Attempts, Label→result, ACUs, Session, PR, Review, Details) plus a
+  per-run pipeline funnel (sessions -> PRs opened -> merged | awaiting
+  merge | rejected) and the list of blockers from needs_human runs.
+- **Trends** — a finished-per-hour (or per-day) bar chart of runs
+  finishing over time, and an outcome breakdown.
+- **Cost** — a per-run session-time bar chart: every run gets its own bar
+  (retried issues are labeled "attempt N"), and runs that hit the
+  `MAX_ACU_PER_SESSION` cap render muted.
 
 Selecting a row in the runs table opens a detail dialog: issue/session/PR
 links, the session's full structured report, and an event timeline
@@ -153,6 +174,7 @@ In non-SIMULATE mode, simulated runs are excluded from metrics and tables
 
 - `GET /api/v1/runs` - all runs with session/PR links, outcomes, ACUs
 - `GET /api/v1/runs/{id}` - one run; `GET /api/v1/runs/{id}/events` - its event timeline
+- `GET /api/v1/issues` - per-issue aggregates (latest state, attempts, reports, events)
 - `GET /api/v1/metrics` - counts by state, funnel, PR/merge/resolution rates, latency medians, ACU totals and per-unit metrics, runs at cap
 - `POST /simulate/issue` - inject an issue (SIMULATE only)
 - `GET /healthz`

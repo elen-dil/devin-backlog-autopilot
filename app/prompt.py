@@ -12,6 +12,7 @@ STRUCTURED_OUTPUT_SCHEMA = {
         "files_changed": {"type": "array", "items": {"type": "string"}},
         "tests_run": {"type": "integer"},
         "tests_passed": {"type": "integer"},
+        "tests_failed": {"type": "integer"},
         "risk_notes": {"type": "string"},
         "blockers": {"type": "string"},
     },
@@ -26,7 +27,6 @@ def build_prompt(
     url: str,
     body: str,
     repo: str,
-    needs_human_label: str,
     approval: dict | None = None,
 ) -> str:
     return f"""You are remediating a GitHub issue in the repository {repo}.
@@ -54,9 +54,12 @@ Rules:
     verifiable provenance,
   - changes to auth, crypto, or network-security defaults beyond the
     issue's stated scope.
-  In that case add the label "{needs_human_label}" to the issue, explain
-  which rule applied in "blockers", and stop.
+  In that case explain which rule applied in "blockers", and stop. The
+  service manages issue labels; do not add or remove any yourself.
 - Before finishing, report your result via the structured output tool.
+  In that report, "tests_run" means tests executed (excluding skipped and
+  xfailed), "tests_passed" means tests passed, and "tests_failed" means
+  tests failed.
 """
 
 

@@ -9,12 +9,13 @@ def run(coro):
 
 
 class FlakyRemoveGitHub(NullGitHubClient):
-    """Fails remove_label while fail_remove is set."""
+    """Fails trigger-label removal while fail_remove is set. Scoped to
+    devin-remediate so dispatch-time outcome-label cleanup still lands."""
 
     fail_remove = True
 
     async def remove_label(self, issue_number, label):
-        if self.fail_remove:
+        if self.fail_remove and label == "devin-remediate":
             raise RuntimeError("github unavailable")
         await super().remove_label(issue_number, label)
 
@@ -115,6 +116,25 @@ def test_failed_label_removal_keeps_run_active(settings, components):
     run(service.session_poll_tick())
     assert store.get(run_row["id"])["state"] == "pr_open"
     assert ("remove_label", 4, "devin-remediate") in github.events
+
+
+def test_retry_clears_stale_outcome_labels(settings, components):
+    """Re-dispatching an issue strips the previous run's outcome labels
+    (devin-needs-human, devin-pr-rejected) before the session starts."""
+    store, devin, github = components
+    devin.plan_outcome(9, "needs_human")
+    service = AutopilotService(settings, store, devin, github)
+    _drive(service, 9)
+
+    assert store.by_state("needs_human")[0]["issue_number"] == 9
+    github.events.clear()
+
+    run(service.enqueue_issue(9, "t", "https://x/9", "body", source="test"))
+    run(service.dispatch_tick())
+
+    assert ("remove_label", 9, "devin-needs-human") in github.events
+    assert ("remove_label", 9, "devin-pr-rejected") in github.events
+    assert store.by_state("running")[0]["issue_number"] == 9
 
 
 def test_dispatch_respects_concurrency_cap(settings, components):
