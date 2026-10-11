@@ -139,9 +139,10 @@ An always-visible KPI row groups the headline numbers:
 
 - **Status** — an issue-level headline (issues by latest state: merged,
   awaiting merge, needs human, failed) plus running and queued run counts.
-- **Effectiveness** — *resolution rate* (merged / decided runs, excluding
-  PRs still awaiting merge), *merge rate* (merged / PRs opened),
-  *escalated to human*, and *merged without changes*.
+- **Effectiveness** — *fixes merged* (issues whose latest run merged /
+  issues attempted), *PR acceptance* (merged runs / merged + rejected
+  runs), *policy stops* (needs_human run counts: stops, waived,
+  awaiting), and *failed sessions* (failed runs / all runs).
 - **Throughput** — *median time to PR* (issue enqueued to PR opened,
   anchored on the `pr_opened` event) and *median time to address* review
   feedback.
@@ -175,7 +176,7 @@ In non-SIMULATE mode, simulated runs are excluded from metrics and tables
 - `GET /api/v1/runs` - all runs with session/PR links, outcomes, ACUs
 - `GET /api/v1/runs/{id}` - one run; `GET /api/v1/runs/{id}/events` - its event timeline
 - `GET /api/v1/issues` - per-issue aggregates (latest state, attempts, reports, events)
-- `GET /api/v1/metrics` - counts by state, funnel, PR/merge/resolution rates, latency medians, ACU totals and per-unit metrics, runs at cap
+- `GET /api/v1/metrics` - counts by state, funnel, fix/acceptance/failed rates, latency medians, ACU totals and per-unit metrics, runs at cap
 - `POST /simulate/issue` - inject an issue (SIMULATE only)
 - `GET /healthz`
 

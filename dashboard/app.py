@@ -102,12 +102,6 @@ def _dashboard_theme() -> alt.theme.ThemeConfig:
     }
 
 
-ACU_HELP = (
-    "ACU = Agent Compute Unit: Devin's unit of compute billing. Per-session "
-    "usage isn't always reported, so session time (start to finish) is the "
-    "reliable cost proxy; ACUs are shown where Devin reports them."
-)
-
 # Dataframe row height is ~35px; header counts as one row.
 TABLE_ROW_HEIGHT = 35
 TABLE_MAX_ROWS = 8
@@ -190,8 +184,13 @@ def fmt_number(value):
     return "n/a" if value is None else f"{value:.1f}"
 
 
-def fmt_pct(value):
-    return "n/a" if value is None else f"{value:.0%}"
+def fmt_of(num, den):
+    """'5 of 11 · 45%': the count pair plus the share, or just the pair
+    when the denominator is zero."""
+    num, den = num or 0, den or 0
+    if not den:
+        return f"{num} of {den}"
+    return f"{num} of {den} · {num / den:.0%}"
 
 
 def acu_display(run, settle_seconds=1800) -> str:
@@ -595,8 +594,8 @@ def section_title(text, tip=None):
     help_span = ""
     if tip:
         help_span = (
-            f' <span class="kpi-help" data-tip="{html.escape(tip, quote=True)}">'
-            f"{HELP_ICON}</span>"
+            f' <span class="kpi-help">{HELP_ICON}'
+            f'<span class="kpi-tip">{html.escape(tip)}</span></span>'
         )
     st.markdown(
         f'<div class="sec-title">{html.escape(text)}{help_span}</div>',
@@ -629,23 +628,38 @@ def render_banner(health, metrics):
         st.caption(f":green[**LIVE**] · {repo} · refreshed {refreshed}")
 
 
-def _kpi_tile(label, value, help_text):
-    """Render one KPI tile as HTML with a CSS ::after tooltip.
+def _kpi_tile(label, value, formula, why):
+    """Render one KPI tile as HTML with a hover tooltip.
 
     Streamlit's `help=` tooltips live in a portal that can outlive its anchor
     when the auto-refresh fragment recreates the metric DOM, leaving orphan
     tooltip boxes that overlap newer ones. A native `title` tooltip stays
     bound to its element but is painted by the browser chrome: it carries a
     hover delay, can be canceled when the fragment refresh recreates the DOM
-    mid-hover, and does not render at all in some embedded views. A CSS
-    ::after tooltip renders inside the page, so it has none of those issues
-    while remaining bound to the element.
+    mid-hover, and does not render at all in some embedded views. The tooltip
+    here is a real child element inside `.kpi-help` (previously a CSS ::after
+    carrying the same content): it stays bound to its anchor across fragment
+    refreshes the same way the ::after did, while allowing multi-part HTML
+    content — a formula line (a fraction via {"num","den"} or an italic
+    expression via {"expr"}) plus a "why it matters" line.
     """
-    tip = html.escape(help_text, quote=True)
+    if "expr" in formula:
+        formula_html = (
+            f'<span class="expr">{html.escape(formula["expr"])}</span>'
+        )
+    else:
+        formula_html = (
+            '<span class="frac">'
+            f'<span class="num">{html.escape(formula["num"])}</span>'
+            f'<span class="den">{html.escape(formula["den"])}</span>'
+            "</span>"
+        )
     return (
         '<div class="kpi">'
         f'<div class="kpi-label">{html.escape(label)}'
-        f'<span class="kpi-help" data-tip="{tip}">{HELP_ICON}</span></div>'
+        f'<span class="kpi-help">{HELP_ICON}'
+        f'<span class="kpi-tip">{formula_html}'
+        f'<span class="why">{html.escape(why)}</span></span></span></div>'
         f'<div class="kpi-value">{html.escape(value)}</div>'
         "</div>"
     )
@@ -677,8 +691,9 @@ def render_kpis(metrics, runs, issues):
                 _kpi_tile(
                     "Issues",
                     issues_headline,
+                    {"expr": "issues grouped by latest run state"},
                     "Each tracked issue counted once, at its latest run's "
-                    "state. Retried issues count at the most recent "
+                    "state; retried issues count at the most recent "
                     "attempt.",
                 ),
                 unsafe_allow_html=True,
@@ -687,6 +702,7 @@ def render_kpis(metrics, runs, issues):
                 _kpi_tile(
                     "Active",
                     f"{counts['running']} running · {counts['queued']} queued",
+                    {"expr": "running + queued runs"},
                     "Runs with a live Devin session, plus labeled issues "
                     "waiting for a free session slot "
                     "(MAX_CONCURRENT_SESSIONS).",
@@ -696,45 +712,63 @@ def render_kpis(metrics, runs, issues):
 
         with eff_col:
             group_label("Effectiveness")
-            res_col, merge_col, human_col, fpa_col = st.columns(4)
-            res_col.markdown(
+            fix_col, accept_col, stops_col, failed_col = st.columns(4)
+            fix_col.markdown(
                 _kpi_tile(
-                    "Resolution rate",
-                    fmt_pct(metrics.get("resolution_rate")),
-                    "merged ÷ decided runs; PRs still awaiting merge are "
-                    "excluded.",
+                    "Fixes merged",
+                    fmt_of(
+                        metrics.get("issues_merged"),
+                        metrics.get("issues_attempted"),
+                    ),
+                    {"num": "merged fixes", "den": "issues attempted"},
+                    "Backlog items that shipped, the outcome a leader is "
+                    "paying for; PRs still awaiting merge count in the "
+                    "denominator only.",
                 ),
                 unsafe_allow_html=True,
             )
-            merge_col.markdown(
+            accept_col.markdown(
                 _kpi_tile(
-                    "Merge rate",
-                    fmt_pct(metrics.get("merge_rate")),
-                    "Share of opened PRs that were merged. "
-                    "Formula: merged ÷ PRs opened.",
+                    "PR acceptance",
+                    fmt_of(counts["merged"], metrics.get("prs_decided")),
+                    {
+                        "num": "merged runs",
+                        "den": "merged runs + rejected runs",
+                    },
+                    "Quality of Devin's work as judged by a human "
+                    "reviewer; PRs nobody has ruled on yet are excluded.",
                 ),
                 unsafe_allow_html=True,
             )
-            human_col.markdown(
+            stops_col.markdown(
                 _kpi_tile(
-                    "Escalated to human",
-                    fmt_pct(metrics.get("human_intervention_rate")),
-                    "Share of decided runs that ended needs-human or with a "
-                    "rejected PR. Needs-human outcomes are policy "
-                    "escalations (major-version bumps, releases under 30 "
-                    "days old, auth/crypto changes), not failures. "
-                    "Formula: (needs human + rejected) ÷ decided runs; "
-                    "PRs still awaiting merge are excluded.",
+                    "Policy stops",
+                    f"{metrics.get('policy_stops') or 0} stops · "
+                    f"{metrics.get('policy_stops_waived') or 0} waived · "
+                    f"{metrics.get('policy_stops_awaiting') or 0} awaiting",
+                    {
+                        "expr": (
+                            "stops = needs_human runs, waived = approved "
+                            "runs after an earlier needs_human, awaiting = "
+                            "issues whose latest run is needs_human"
+                        )
+                    },
+                    "Devin's judgment: how often it refused a risky "
+                    "change, and whether a human later left the stop or "
+                    "overrode it.",
                 ),
                 unsafe_allow_html=True,
             )
-            fpa_col.markdown(
+            failed_col.markdown(
                 _kpi_tile(
-                    "Merged without changes",
-                    fmt_pct(metrics.get("first_pass_approval_rate")),
-                    "Merged PRs with zero feedback rounds ÷ merged PRs. "
-                    "PRs merged with no review at all count. Comments "
-                    "containing '(aside)' don't count as feedback rounds.",
+                    "Failed sessions",
+                    fmt_of(
+                        metrics.get("failed_runs"),
+                        metrics.get("total_runs"),
+                    ),
+                    {"num": "failed runs", "den": "all runs"},
+                    "Reliability of the automation itself, separate from "
+                    "the quality of the fixes.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -746,10 +780,15 @@ def render_kpis(metrics, runs, issues):
                 _kpi_tile(
                     "Median time to PR",
                     fmt_minutes(metrics.get("median_label_to_pr_minutes")),
-                    "Median minutes from the issue being enqueued (label "
-                    "seen by the poller) to Devin opening the PR. Runs "
-                    "whose PR opened before tracking began fall back to "
-                    "the run's finish time.",
+                    {
+                        "expr": (
+                            "median(PR opened − enqueued) over runs "
+                            "with a PR"
+                        )
+                    },
+                    "How quickly a labeled issue becomes a reviewable PR; "
+                    "runs whose PR opened before tracking began fall back "
+                    "to the run's finish time.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -764,11 +803,15 @@ def render_kpis(metrics, runs, issues):
                 _kpi_tile(
                     "Median time to address",
                     addr_text,
-                    "Median minutes from a reviewer's feedback on the PR "
-                    "to Devin's reply marking it addressed. The reply "
-                    "comes from Devin's built-in PR monitoring on the PR, "
-                    "which the service observes. n is the number of "
-                    "addressed feedback items.",
+                    {
+                        "expr": (
+                            "median(feedback addressed − feedback posted) "
+                            "over addressed feedback"
+                        )
+                    },
+                    "How fast Devin turns reviewer feedback around; the "
+                    "reply comes from Devin's built-in PR monitoring, and "
+                    "n counts addressed items.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -780,7 +823,10 @@ def render_kpis(metrics, runs, issues):
                 _kpi_tile(
                     "Session minutes",
                     fmt_minutes(metrics.get("total_session_minutes")),
-                    f"Total Devin session time across finished runs. {ACU_HELP}",
+                    {"expr": "sum(finished − started) over finished runs"},
+                    "Devin session time is the reliable cost proxy "
+                    "because per-session ACU (Agent Compute Unit) usage "
+                    "is not always reported.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -788,8 +834,9 @@ def render_kpis(metrics, runs, issues):
                 _kpi_tile(
                     "Minutes per merged fix",
                     fmt_minutes(metrics.get("session_minutes_per_merged_fix")),
-                    "Total session minutes ÷ merged fixes. Includes time "
-                    f"spent on runs that did not merge. {ACU_HELP}",
+                    {"num": "session minutes", "den": "merged fixes"},
+                    "What one shipped fix costs in session time, "
+                    "including runs that never merged.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -1428,9 +1475,17 @@ code{font-family:inherit!important;}
 .kpi-label{color:var(--text-color);color:color-mix(in srgb,var(--text-color) 60%,transparent);display:flex;align-items:center;gap:6px;}
 .kpi-help{position:relative;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;color:var(--text-color);color:color-mix(in srgb,var(--text-color) 55%,transparent);cursor:help;}
 .kpi-help svg{display:block;width:14px;height:14px;}
-.kpi-help::after{content:attr(data-tip);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);width:max-content;max-width:15rem;white-space:normal;text-align:left;background:#31333F;color:#fff;font-weight:400;line-height:1.45;padding:7px 9px;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:100;}
+.kpi-tip{position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);width:max-content;max-width:15rem;white-space:normal;text-align:left;background:#31333F;color:#fff;font-weight:400;line-height:1.45;padding:7px 9px;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:100;}
 .kpi-help::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:4px solid transparent;border-bottom-color:#31333F;opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:100;}
-.kpi-help:hover::after,.kpi-help:hover::before{opacity:1;visibility:visible;}
+.kpi-help:hover .kpi-tip,.kpi-help:hover::before{opacity:1;visibility:visible;}
+/* Tooltip body: formula as a stacked fraction (the numerator's bottom
+   border is the fraction bar) or a single italic expression, then the
+   "why it matters" line. */
+.kpi-tip .frac{display:inline-flex;flex-direction:column;align-items:center;font-style:italic;}
+.kpi-tip .num{border-bottom:1px solid;padding:0 4px;}
+.kpi-tip .den{padding:0 4px;}
+.kpi-tip .expr{font-style:italic;}
+.kpi-tip .why{display:block;margin-top:5px;}
 .kpi-value{color:var(--text-color);line-height:1.4;}
 
 /* Full-title tooltip for truncated Issue cells (see render_overview). */
