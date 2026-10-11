@@ -519,7 +519,15 @@ def funnel_counts(metrics, runs):
         ("Sessions", sum(1 for r in runs if r.get("session_id"))),
         ("PRs opened", sum(1 for r in runs if r.get("pr_url"))),
         ("Merged", sum(1 for r in runs if r.get("state") == "merged")),
-        ("Awaiting merge", sum(1 for r in runs if r.get("state") == "pr_open")),
+        (
+            "Awaiting merge",
+            sum(
+                1
+                for r in runs
+                if r.get("pr_url")
+                and r.get("state") in ("running", "pr_open")
+            ),
+        ),
         ("Rejected", sum(1 for r in runs if r.get("state") == "rejected")),
     ]
 

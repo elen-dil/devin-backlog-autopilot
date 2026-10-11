@@ -58,18 +58,24 @@ def test_funnel_counts_are_per_run():
         ("Awaiting merge", 1),
         ("Rejected", 0),
     ]
-    # Older API shape falls back to the runs list, still per run.
+    # Older API shape falls back to the runs list, still per run. A
+    # running run with a PR counts under Awaiting merge so the terminal
+    # stages always partition PRs opened.
     runs = [
         {"id": 1, "issue_number": 7, "session_id": "a", "state": "rejected",
          "pr_url": "p"},
         {"id": 2, "issue_number": 7, "session_id": "b", "state": "merged",
          "pr_url": "p2"},
+        {"id": 3, "issue_number": 8, "session_id": "c", "state": "running",
+         "pr_url": "p3"},
+        {"id": 4, "issue_number": 9, "session_id": "d", "state": "running",
+         "pr_url": None},
     ]
     assert dash.funnel_counts({}, runs) == [
-        ("Sessions", 2),
-        ("PRs opened", 2),
+        ("Sessions", 4),
+        ("PRs opened", 3),
         ("Merged", 1),
-        ("Awaiting merge", 0),
+        ("Awaiting merge", 1),
         ("Rejected", 1),
     ]
 

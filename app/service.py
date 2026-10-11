@@ -1083,14 +1083,20 @@ def compute_metrics(runs, settings, events=None) -> dict:
         "acu_settle_seconds": ACU_SETTLE_SECONDS,
         # The funnel counts runs (not distinct issues) at every stage, so
         # the terminal stages partition the PR count: merged + awaiting
-        # merge + rejected == prs. "sessions" keys on session_id — a
+        # merge + rejected == prs. awaiting_merge is keyed on pr_url and
+        # covers runs still in "running" (a session that already reported
+        # its PR) as well as pr_open. "sessions" keys on session_id — a
         # Devin session really existed — not started_at, which is stamped
         # on dispatch claim even when create_session fails.
         "funnel": {
             "sessions": sum(1 for r in runs if r["session_id"]),
             "prs": sum(1 for r in runs if r["pr_url"]),
             "merged": merged,
-            "awaiting_merge": by_state.get("pr_open", 0),
+            "awaiting_merge": sum(
+                1
+                for r in runs
+                if r["pr_url"] and r["state"] in ("running", "pr_open")
+            ),
             "rejected": rejected,
         },
         "issues_completed": finished,

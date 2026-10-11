@@ -276,16 +276,20 @@ def test_funnel_counts_runs_not_issues(settings, components):
                 session_id="s-7a")
     _insert_run(store, 7, "merged", created=3, started=4, finished=5,
                 pr_url="https://x/pull/7", session_id="s-7b")
-    _insert_run(store, 8, "queued", created=0)
+    # A running run that already reported a PR counts under
+    # awaiting merge, so the partition holds mid-flight.
+    _insert_run(store, 8, "running", created=6, started=7,
+                pr_url="https://x/pull/8", session_id="s-8")
+    _insert_run(store, 9, "queued", created=0)
 
     m = compute_metrics(store.all(), settings)
-    assert m["total_runs"] == 3
+    assert m["total_runs"] == 4
     # Issue 7's two sessions count once each at the "sessions" stage.
     assert m["funnel"] == {
-        "sessions": 2,
-        "prs": 1,
+        "sessions": 3,
+        "prs": 2,
         "merged": 1,
-        "awaiting_merge": 0,
+        "awaiting_merge": 1,
         "rejected": 0,
     }
     funnel = m["funnel"]
