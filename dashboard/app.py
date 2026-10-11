@@ -115,7 +115,7 @@ TABLE_MAX_ROWS = 8
 # Attempts, Time, ACUs, Session, PR, Review, Details). The hover-tooltip
 # script in render_overview() needs the same geometry, so both read
 # these values.
-TABLE_COL_WIDTHS = [260, 100, 70, 60, 65, 65, 60, 70, 50, 130, 70]
+TABLE_COL_WIDTHS = [220, 160, 70, 60, 65, 65, 60, 70, 50, 130, 70]
 
 # Auto-refresh cadence for the dashboard fragment. An invalid or
 # non-positive value falls back to 10s rather than crashing the page.
@@ -225,6 +225,20 @@ def review_display(run) -> str:
     if run.get("state") == "pr_open":
         return "Pending review"
     return "—"
+
+
+def status_display(run):
+    """Status cell: the pipeline state, with Devin's outcome appended
+    when it explains why the run is waiting on a human."""
+    label = state_label(run.get("state"))
+    outcome = run.get("outcome")
+    if (
+        run.get("state") == "needs_human"
+        and outcome
+        and outcome != "needs_human"
+    ):
+        return f"{label} · {outcome_label(outcome)}"
+    return label
 
 
 def session_minutes(run):
@@ -779,7 +793,7 @@ def render_runs_table(issues):
                 # truncating here too would lose the tail twice. Hovering a
                 # truncated cell shows the whole title in the grid tooltip.
                 "Issue": issue_ref(latest, limit=None),
-                "Status": state_label(latest.get("state")),
+                "Status": status_display(latest),
                 "Approved": "Yes" if latest.get("approved") else "",
                 "Date": fmt_date(latest.get("created_at")),
                 "Attempts": issue["attempts"],
