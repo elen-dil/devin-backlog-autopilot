@@ -323,7 +323,7 @@ def test_review_backfill_marks_rejected_runs(settings, components):
     assert store.get(run_id)["review_status"] == "rejected"
 
 
-def test_review_metrics(settings):
+def test_feedback_address_minutes(settings):
     base = {
         "session_id": "s-1",
         "pr_url": PR_URL,
@@ -333,10 +333,9 @@ def test_review_metrics(settings):
         "finished_at": "2024-01-01T00:40:00+00:00",
     }
     runs = [
-        {**base, "issue_number": 1, "state": "merged", "review_rounds": 0},
-        {**base, "issue_number": 2, "state": "merged", "review_rounds": 2},
-        # Rejected runs don't count toward the first-pass denominator.
-        {**base, "issue_number": 3, "state": "rejected", "review_rounds": 1},
+        {**base, "issue_number": 1, "state": "merged"},
+        {**base, "issue_number": 2, "state": "merged"},
+        {**base, "issue_number": 3, "state": "rejected"},
     ]
     events = [
         {"event": "feedback_addressed", "detail": json.dumps({"minutes": 30.0})},
@@ -346,11 +345,8 @@ def test_review_metrics(settings):
     ]
 
     m = compute_metrics(runs, settings, events=events)
-    assert m["first_pass_approval_rate"] == 0.5
     assert m["median_feedback_address_minutes"] == 45.0
 
-    # Without events there is no median; without merged runs no rate.
+    # Without events there is no median.
     m = compute_metrics(runs, settings)
     assert m["median_feedback_address_minutes"] is None
-    m = compute_metrics(runs[2:], settings)
-    assert m["first_pass_approval_rate"] is None

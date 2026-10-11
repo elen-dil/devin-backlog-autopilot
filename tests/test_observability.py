@@ -203,10 +203,16 @@ def test_metrics_hand_computed(settings, components):
         "max_acu_per_session",
         "funnel",
         "issues_completed",
-        "pr_rate",
-        "merge_rate",
-        "resolution_rate",
-        "human_intervention_rate",
+        "issues_attempted",
+        "issues_merged",
+        "fix_rate",
+        "prs_decided",
+        "pr_acceptance_rate",
+        "policy_stops",
+        "policy_stops_waived",
+        "policy_stops_awaiting",
+        "failed_runs",
+        "failed_rate",
         "median_latency_minutes",
         "median_label_to_result_minutes",
         "median_label_to_pr_minutes",
@@ -220,7 +226,6 @@ def test_metrics_hand_computed(settings, components):
         "total_session_minutes",
         "session_minutes_per_run",
         "session_minutes_per_merged_fix",
-        "first_pass_approval_rate",
         "median_feedback_address_minutes",
         "feedback_address_count",
     }
@@ -244,12 +249,17 @@ def test_metrics_hand_computed(settings, components):
         "rejected": 1,
     }
     assert m["issues_completed"] == 5
-    assert m["pr_rate"] == 0.6  # 3 PRs / 5 finished
-    assert m["merge_rate"] == 1 / 3  # 1 merged / 3 PRs (rejected counts)
-    # decided runs exclude the still-open PR: 1 merged / 4 decided
-    assert m["resolution_rate"] == 0.25
-    # 1 needs_human + 1 rejected / 4 decided
-    assert m["human_intervention_rate"] == 0.5
+    assert m["issues_attempted"] == 6
+    assert m["issues_merged"] == 1
+    assert m["fix_rate"] == 1 / 6
+    # 1 merged + 1 rejected; the pr_open run awaits a verdict.
+    assert m["prs_decided"] == 2
+    assert m["pr_acceptance_rate"] == 0.5
+    assert m["policy_stops"] == 1
+    assert m["policy_stops_waived"] == 0  # no approved retry on issue 3
+    assert m["policy_stops_awaiting"] == 1
+    assert m["failed_runs"] == 1
+    assert m["failed_rate"] == 1 / 6
     # latencies 60, 30, 30, 40, 40 -> median 40
     assert m["median_latency_minutes"] == 40.0
     # label->result 70, 60, 50, 80, 90 -> median 70
@@ -297,14 +307,28 @@ def test_funnel_counts_runs_not_issues(settings, components):
         funnel["merged"] + funnel["awaiting_merge"] + funnel["rejected"]
         == funnel["prs"]
     )
+    # Issue-level metrics key on the latest run: issue 7's earlier
+    # needs_human run counts as a stop but not as awaiting.
+    assert m["issues_attempted"] == 3
+    assert m["issues_merged"] == 1
+    assert m["policy_stops"] == 1
+    assert m["policy_stops_awaiting"] == 0
 
 
 def test_metrics_endpoint_and_empty_guards(settings, components):
     _, client = _client(settings, components)
     m = client.get("/api/v1/metrics").json()
     assert m["total_runs"] == 0
-    assert m["pr_rate"] == 0.0
-    assert m["resolution_rate"] == 0.0
+    assert m["fix_rate"] == 0.0
+    assert m["pr_acceptance_rate"] == 0.0
+    assert m["failed_rate"] == 0.0
+    assert m["issues_attempted"] == 0
+    assert m["issues_merged"] == 0
+    assert m["prs_decided"] == 0
+    assert m["policy_stops"] == 0
+    assert m["policy_stops_waived"] == 0
+    assert m["policy_stops_awaiting"] == 0
+    assert m["failed_runs"] == 0
     assert m["median_latency_minutes"] is None
     assert m["median_label_to_result_minutes"] is None
     assert m["median_label_to_pr_minutes"] is None

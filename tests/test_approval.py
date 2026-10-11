@@ -238,11 +238,12 @@ def test_issues_endpoint_aggregates_attempts(settings, components):
     )
 
 
-def test_human_intervention_rate(settings):
-    def _run(state, **over):
+def test_policy_stop_metrics(settings):
+    def _run(id, issue_number, state, **over):
         base = {
+            "id": id,
             "state": state,
-            "issue_number": 1,
+            "issue_number": issue_number,
             "session_id": None,
             "pr_url": None,
             "acus": None,
@@ -254,14 +255,36 @@ def test_human_intervention_rate(settings):
         return base
 
     runs = [
-        _run("merged", finished_at="x", pr_url="p", session_id="s"),
-        _run("needs_human", finished_at="x", session_id="s"),
-        _run("rejected", finished_at="x", pr_url="p", session_id="s"),
-        _run("running", started_at="x"),
+        # Issue 1 stopped and is still parked there.
+        _run(1, 1, "needs_human"),
+        # Issue 2 stopped, then an approved retry merged it: the stop
+        # counts and is waived, but the issue is no longer awaiting.
+        _run(2, 2, "needs_human"),
+        _run(3, 2, "merged", approved=1, pr_url="p", session_id="s"),
+        # An approved run with no earlier needs_human run on its issue
+        # must not count as waived.
+        _run(4, 3, "merged", approved=1, pr_url="p", session_id="s"),
+        # A stop is never its own earlier stop: run 5's approval doesn't
+        # make run 5 itself waived, and issue 4 stays awaiting.
+        _run(5, 4, "needs_human", approved=1),
     ]
     metrics = compute_metrics(runs, settings)
-    # 2 of 3 finished runs needed a human (needs_human + rejected).
-    assert metrics["human_intervention_rate"] == 2 / 3
+    assert metrics["policy_stops"] == 3
+    assert metrics["policy_stops_waived"] == 1
+    assert metrics["policy_stops_awaiting"] == 2
+
+
+def test_policy_stops_waived_after_approved_retry(settings, components):
+    store, devin, github = components
+    service = AutopilotService(settings, store, devin, github)
+    _seed_needs_human(service, devin, 8)
+
+    github.issue_comments[8] = [_write_comment()]
+    _drive(service, 8, approved=True)
+
+    metrics = compute_metrics(store.all(), settings)
+    assert metrics["policy_stops"] >= 1
+    assert metrics["policy_stops_waived"] == 1
 
 
 def test_issues_endpoint_via_client(settings, components):

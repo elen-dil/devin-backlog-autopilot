@@ -105,6 +105,56 @@ def test_cost_run_label_gives_each_attempt_its_own_bar():
     assert len({dash.cost_run_label(r, runs) for r in runs}) == 3
 
 
+def test_fmt_of():
+    assert dash.fmt_of(5, 11) == "5 of 11 · 45%"
+    # A zero denominator shows the pair alone, no share.
+    assert dash.fmt_of(0, 0) == "0 of 0"
+    assert dash.fmt_of(0, 4) == "0 of 4 · 0%"
+    assert dash.fmt_of(None, None) == "0 of 0"
+
+
+def test_kpi_tile_fraction_tooltip():
+    out = dash._kpi_tile(
+        "Fixes merged",
+        "5 of 11 · 45%",
+        {"num": "merged fixes", "den": "issues attempted"},
+        "Backlog items that shipped.",
+    )
+    assert 'class="frac"' in out
+    assert '<span class="num">merged fixes</span>' in out
+    assert '<span class="den">issues attempted</span>' in out
+    assert 'class="kpi-tip"' in out
+    assert 'class="why">' in out
+    assert "data-tip" not in out
+
+
+def test_kpi_tile_expr_tooltip():
+    out = dash._kpi_tile(
+        "Active",
+        "1 running · 2 queued",
+        {"expr": "running + queued runs"},
+        "Runs with a live Devin session.",
+    )
+    assert 'class="expr"' in out
+    assert 'class="frac"' not in out
+
+
+def test_kpi_tile_escapes_html():
+    out = dash._kpi_tile(
+        "A<B",
+        "1 < 2",
+        {"expr": "a < b & c"},
+        "x & y < z",
+    )
+    assert "&lt;" in out
+    assert "&amp;" in out
+    # The raw inputs are escaped everywhere they land.
+    assert "A<B" not in out
+    assert "1 < 2" not in out
+    assert "a < b & c" not in out
+    assert "x & y < z" not in out
+
+
 def test_run_reason_falls_back_to_summary_then_error():
     run = {"output_json": json.dumps({"blockers": "", "summary": "cannot repro"})}
     assert dash.run_reason(run) == "cannot repro"
