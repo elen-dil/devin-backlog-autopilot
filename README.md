@@ -1,184 +1,260 @@
 # devin-backlog-autopilot
 
-Backlog issues (dependency CVEs, scanner findings, small bugs) are real work that
-almost never gets prioritized. This service closes that gap: label a GitHub issue
-`devin-remediate` and it spins up a cloud Devin session that fixes the issue and
-opens a PR, while a small dashboard tracks throughput, success rates, and cost.
+Every repository has a backlog of small, important fixes that never get
+scheduled: dependency CVEs, scanner findings, minor bugs. This service turns
+that backlog into pull requests. Apply the label `devin-remediate` to a GitHub
+issue and a cloud Devin session reproduces the problem, fixes it, opens a PR,
+and reports back on the issue. A human reviews and merges. A dashboard shows
+what ran, what shipped, what needs a decision, and what it cost.
 
-## Architecture
+Built against a fork of Apache Superset:
+[elen-dil/superset-ali](https://github.com/elen-dil/superset-ali) (see its
+issues and pull requests for the remediations this produced).
 
-```
-                 label: devin-remediate
-                          │
-        poll every 60s    ▼
-        open issues with  enqueue (idempotent:
-        trigger label     one active run per issue)
-                          │
-                          ▼
-                    SQLite `runs`  (the queue;
-                    queued | running | pr_open |
-                    merged | rejected |
-                    needs_human | failed)
-                                              │
-                        dispatcher (MAX_CONCURRENT_SESSIONS=3)
-                                              │
-                                              ▼
-                                    Devin session (1 per issue,
-                                    max_acu_limit=10, structured
-                                    output required)
-                                              │
-                    poll every 30s ◀──────────┘
-                    (terminal: exit/error/suspended,
-                     or running + finished/waiting_for_user)
-                                              │
-              ┌───────────────┬───────────────┴──────────────┐
-              ▼               ▼                              ▼
-          fixed + PR      needs_human /               failed to start
-              │           not_reproducible /           or errored
-              │           ACU cap hit                       │
-              ▼               ▼                              ▼
-        label:           label:                        state: failed,
-        devin-pr-open    devin-needs-human             trigger label removed
-              │
-              ▼
-     merge check every 5 min ──▶ state: merged (label: devin-merged)
-                                   or rejected (label: devin-pr-rejected)
+![Dashboard](docs/dashboard-1440x900.png)
 
-Dashboard (Streamlit :8501) ──reads──▶ GET /api/v1/runs,
-                                       /api/v1/issues, /api/v1/metrics
-```
+## Quick start
 
-## Design decisions
+You need Docker (or Python 3.12+ to run without it). Nothing else.
 
-- **One session per issue.** No central orchestrator decides what Devin does;
-  each run is a self-contained session with a standardized prompt and a
-  required structured-output report.
-- **The database is the queue.** Issue title/body/url are persisted at enqueue
-  time, so a restart picks up queued, running, and pr_open runs with no
-  recovery path.
-- **Idempotency at the DB level.** A partial unique index
-  (`issue_number WHERE state IN ('queued','running')`) makes every enqueue
-  path (poller, simulate endpoint) race-safe. Re-labeling after a run closes
-  starts a fresh run.
-- **Session creation dedups on tags.** The sessions API has no idempotency
-  keys, so when `POST /sessions` fails ambiguously (5xx or transport error)
-  the client first looks for a session carrying the run's `issue-<n>` tag and
-  adopts it, instead of risking a duplicate session.
-- **Structured output, not log scraping.** Sessions must report
-  `outcome`/`summary`/`tests_passed` via Devin's `structured_output_schema`
-  before finishing, so state transitions are driven by data, not parsing.
-- **Humans merge, always.** Devin opens PRs but never merges. `needs_human`
-  (including ACU-cap suspensions and not-reproducible findings) is a first-class
-  outcome that leaves a comment explaining why.
-- **Escalations can be waived.** Re-applying `devin-remediate` together with
-  `devin-approved` retries an escalated issue: the service looks for a
-  decision comment by a write-access author posted after the last run
-  finished, bakes it into the prompt as a waiver of the cited escalation
-  rules, and removes `devin-approved` when the run finalizes (single-use).
-  With no qualifying comment the run fails and asks for the decision.
-  The service's own issue comments ("Devin session started:", "Autopilot
-  finished:", ...) can never count as a decision: they post under the
-  maintainer's token and so carry a write-access author_association, so the
-  approval check filters them by prefix.
-- **Retries clean the board.** Before a new session is created the run
-  strips the issue's stale outcome labels (`devin-needs-human`,
-  `devin-pr-rejected`), so GitHub shows the fresh attempt, not the old
-  result.
-- **Time-to-PR anchors on the PR, not the session.** The session poller
-  records a `pr_opened` run event the moment a session reports a pull
-  request and stores `pr_url` immediately. Runs that predate the event get
-  it backfilled at startup from the PR's GitHub `created_at`.
-- **Guardrails.** `MAX_ACU_PER_SESSION` caps spend per issue,
-  `MAX_CONCURRENT_SESSIONS` caps parallelism, and a session that fails to start
-  gets its trigger label removed so the poller can't loop on it.
-- **Polling, not webhooks.** A 60s poll of open issues carrying the trigger
-  label is the only ingress: it works with no public endpoint, no tunnel, and
-  no inbound attack surface — the right trade for a locally-hosted service.
-  A webhook fast path was removed as unused infrastructure (see git history).
+### Try it with no credentials (simulate mode)
 
-## Setup
+Simulate mode swaps in a fake Devin and makes no calls to GitHub, so the whole
+pipeline runs locally in about a minute.
 
 ```bash
-cp .env.example .env        # fill in keys (or keep SIMULATE=true)
-docker compose up --build   # api on :8000, dashboard on :8501
+git clone https://github.com/elen-dil/devin-backlog-autopilot
+cd devin-backlog-autopilot
+cp .env.example .env          # SIMULATE=true is already set
+docker compose up --build     # API on :8000, dashboard on :8501
 ```
 
-Or locally:
+In a second terminal, inject a couple of issues:
 
 ```bash
-pip install -r requirements.txt
-uvicorn app.main:app --port 8000            # API
-FASTAPI_BASE_URL=http://localhost:8000 \
-  streamlit run dashboard/app.py            # dashboard
-```
-
-## Simulate mode
-
-`SIMULATE=true` swaps in a fake Devin client (sessions finish after a few
-polls, results are prefixed `[SIMULATED]`) and disables all GitHub traffic, so
-the repo can be exercised with no credentials:
-
-```bash
+# A fix that succeeds and "opens" a PR
 curl -X POST localhost:8000/simulate/issue \
   -H 'content-type: application/json' \
   -d '{"number": 1, "title": "demo issue", "body": "fix me"}'
 
-# force a needs_human outcome:
+# A fix Devin escalates to a human
 curl -X POST localhost:8000/simulate/issue \
   -H 'content-type: application/json' \
   -d '{"number": 2, "title": "ambiguous", "outcome": "needs_human"}'
 ```
 
-## Dashboard
+Open http://localhost:8501. Within about a minute both runs finish: issue 1
+lands in "Awaiting merge" with a placeholder PR link, issue 2 lands in "Needs
+human" with a blocker note. Simulated results are prefixed `[SIMULATED]` and
+are hidden from the dashboard once you switch to live mode.
 
-Streamlit app on :8501, reads only from the FastAPI API (never SQLite directly),
-auto-refreshes every `DASHBOARD_REFRESH_SECONDS` (default 10s). A compact banner shows LIVE vs SIMULATE MODE plus the
-repo and last-refresh time. Everything is designed to fit one laptop screen.
+### Run it against a real repository
 
-An always-visible KPI row groups the headline numbers:
+1. Fork the repository Devin will work on and connect that fork to your Devin
+   organization so sessions can clone it and open pull requests.
+2. Fill in `.env`:
 
-- **Status** — an issue-level headline (issues by latest state: merged,
-  awaiting merge, needs human, failed) plus running and queued run counts.
-- **Effectiveness** — *fixes merged* (issues whose latest run merged /
-  issues attempted), *PR acceptance* (merged runs / merged + rejected
-  runs), *policy stops* (needs_human run counts: stops, waived,
-  awaiting), and *failed sessions* (failed runs / all runs).
-- **Throughput** — *median time to PR* (issue enqueued to PR opened,
-  anchored on the `pr_opened` event) and *median time to address* review
-  feedback.
-- **Cost** — *session minutes* (total Devin session time across finished
-  runs) and *minutes per merged fix* (including time spent on runs that
-  did not merge). ACUs are shown where Devin reports them; there is no
-  dollar pricing.
+   | Variable         | What it is                                                                               |
+   | ---------------- | ---------------------------------------------------------------------------------------- |
+   | `SIMULATE`       | `false`                                                                                  |
+   | `DEVIN_API_KEY`  | A Devin service-user key (`cog_...`). See Devin API authentication.                       |
+   | `DEVIN_ORG_ID`   | Your Devin organization id (`org-...`).                                                  |
+   | `GITHUB_TOKEN`   | A GitHub token with `repo` scope on the fork. It reads issues and PRs and writes labels and comments. |
+   | `GITHUB_REPO`    | The fork, as `owner/name`.                                                               |
 
-Below the KPIs, three tabs:
+3. `docker compose up --build`
 
-- **Overview** — a compact runs table (Issue, Status, Approved, Date,
-  Attempts, To result, ACUs, Session, PR, Review, Details) plus a
-  per-run pipeline funnel (sessions -> PRs opened -> merged | awaiting
-  merge | rejected) and the list of blockers from needs_human runs.
-- **Trends** — a finished-per-hour (or per-day) bar chart of runs
-  finishing over time, and an outcome breakdown.
-- **Cost** — a per-run session-time bar chart: every run gets its own bar
-  (retried issues are labeled "attempt N"), and runs that hit the
-  `MAX_ACU_PER_SESSION` cap render muted.
+Label any open issue in the fork `devin-remediate`. Within a minute the issue
+gets a `devin-running` label and a comment with the session link; the dashboard
+shows the run. A typical fix reaches a PR in 3 to 15 minutes.
 
-Selecting a row in the runs table opens a detail dialog: issue/session/PR
-links, the session's full structured report, and an event timeline
-(`run_events`) covering queue source, session creation, status changes, every
-GitHub write-back, and finalization.
+To run without Docker:
 
-In non-SIMULATE mode, simulated runs are excluded from metrics and tables
-(`is_simulated` flag, set at enqueue time).
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --port 8000                               # API
+FASTAPI_BASE_URL=http://localhost:8000 streamlit run dashboard/app.py   # dashboard
+```
+
+## How a run works
+
+**Trigger.** Every 60 seconds the service asks GitHub for open issues carrying
+`devin-remediate` and queues any that do not already have an active run. The
+queue is a SQLite table with a rule that an issue can have only one active run,
+so repeated polls and restarts never start duplicate work.
+
+**Dispatch.** Up to `MAX_CONCURRENT_SESSIONS` (default 3) runs are active at
+once. For each, the service creates a Devin session with a standard prompt, the
+issue text, a required structured-output schema, and a per-session spend cap
+(`MAX_ACU_PER_SESSION`; an ACU, Agent Compute Unit, is Devin's billing unit).
+The issue gets `devin-running` and a comment with the session link.
+
+**Work.** Devin reproduces the issue on master first, writes a failing test
+where practical, implements the fix, runs the relevant tests, opens a PR that
+references the issue, and reports a verdict: `fixed`, `needs_human`, or
+`not_reproducible`.
+
+**Finalize.** Every 30 seconds the service polls each session. When one
+finishes, the service records the verdict, swaps the issue's labels, posts a
+result comment (summary, tests, risk notes, blockers, PR link), and closes the
+session so it stops consuming compute.
+
+**Merge check.** Every 5 minutes the service checks each open PR. Merged PRs
+mark the run merged; closed-unmerged PRs mark it rejected and keep the closing
+comment as the reason. Review comments and Devin's replies to them are recorded
+on the run's timeline.
+
+```
+label devin-remediate ──▶ poll 60s ──▶ SQLite runs (queue) ──▶ dispatch (≤3 at once)
+                                                                      │
+                                                                      ▼
+                                                        Devin session, one per issue
+                                                                      │
+                                               poll 30s ◀─────────────┘
+                                                   │
+                     ┌─────────────────────────────┼──────────────────────────┐
+                     ▼                             ▼                          ▼
+             fixed + PR opened            needs_human / not reproducible    errored
+             label devin-pr-open          label devin-needs-human           state failed
+                     │
+                     ▼
+             merge check 5 min ──▶ merged (devin-merged) or rejected (devin-pr-rejected)
+```
+
+Dashboard :8501 reads `GET /api/v1/runs`, `/issues`, `/metrics`, `/healthz`.
+It never touches the database.
+
+## Working with it
+
+### Labels
+
+Every state change is mirrored onto the issue as a label, so the team can
+follow along from GitHub without opening the dashboard.
+
+| Label                | Meaning                                                                       |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `devin-remediate`    | The trigger. Apply it to start a run. Removed when the run finishes.          |
+| `devin-running`      | A session is working on this issue.                                           |
+| `devin-pr-open`      | Devin opened a PR; it is waiting for a human to review and merge.             |
+| `devin-merged`       | The PR was merged.                                                            |
+| `devin-pr-rejected`  | The PR was closed without merging.                                            |
+| `devin-needs-human`  | Devin stopped and needs a decision (see below).                               |
+| `devin-approved`     | Apply with `devin-remediate` to retry an escalated issue with your decision. Single use. |
+
+### When Devin stops and asks
+
+The prompt tells Devin not to open a PR when the fix would require a
+major-version dependency upgrade or a breaking change, a dependency version
+published less than 30 days ago or without verifiable provenance, or changes to
+auth, crypto, or network-security defaults beyond the issue's scope. It also
+stops when it cannot reproduce the finding. In each case it labels the issue
+`devin-needs-human` and explains which rule applied.
+
+To proceed anyway:
+
+1. Comment your decision on the issue (you need write access to the repo).
+2. Apply `devin-remediate` and `devin-approved` together.
+
+The next run quotes your comment into Devin's prompt as a waiver for the rules
+the previous run cited, and the previous run's report is included for context.
+`devin-approved` is removed when that run finishes. If no decision comment is
+found, the run fails with a comment asking for one.
+
+### Configuration
+
+Everything is set in `.env`; defaults are shown.
+
+| Variable                    | Default                 | Purpose                                                      |
+| --------------------------- | ----------------------- | ------------------------------------------------------------ |
+| `MAX_ACU_PER_SESSION`       | `10`                    | Spend cap per session, passed to Devin as `max_acu_limit`.   |
+| `MAX_CONCURRENT_SESSIONS`   | `3`                     | Sessions running at once; other issues wait in the queue.    |
+| `ISSUE_POLL_SECONDS`        | `60`                    | How often to look for newly labeled issues.                  |
+| `SESSION_POLL_SECONDS`      | `30`                    | How often to check running sessions.                         |
+| `MERGE_CHECK_SECONDS`       | `300`                   | How often to check open PRs.                                 |
+| `TRIGGER_LABEL` and friends | `devin-*`               | Rename any label.                                            |
+| `DATABASE_PATH`             | `./data/autopilot.db`   | SQLite file (a Docker volume under `./data`).                |
+| `DISPLAY_TZ`                | `America/New_York`      | Timezone for dashboard timestamps.                           |
+| `DASHBOARD_REFRESH_SECONDS` | `10`                    | Dashboard auto-refresh.                                      |
+
+### Dashboard
+
+The dashboard reads only the service's HTTP API, fits one laptop screen, and
+refreshes every 10 seconds. Hover any tile's help icon for its exact formula.
+
+Headline row:
+
+| Group         | Tiles                                                                                                              |
+| ------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Status        | Issues by latest state (merged, awaiting, need human, failed); runs running and queued.                           |
+| Effectiveness | Fixes merged (issues merged / issues attempted); PR acceptance (merged / merged + rejected); policy stops (stops, waived, awaiting); failed sessions. |
+| Throughput    | Median time from label to PR opened; median time for Devin to address review feedback.                            |
+| Cost          | Total session minutes; minutes per merged fix. ACUs are shown where Devin reports them.                           |
+
+Tabs:
+
+- **Overview**: one row per issue (status, attempts, time to result, ACUs,
+  session and PR links, review state), a pipeline funnel (sessions, PRs opened,
+  merged, awaiting merge, rejected), and the list of issues waiting on a
+  decision with the rule that stopped them. Click a row for every attempt, the
+  full structured report, and an event timeline.
+- **Trends**: runs finished over time and an outcome breakdown.
+- **Cost**: session minutes per run.
+
+## Design decisions
+
+- **One session per issue, nothing in between.** There is no planner or
+  orchestrator. Each run is a self-contained session: standard prompt in,
+  structured report out. Parallelism is a config value, not a scheduler.
+- **The database is the queue.** Issue title, body, and URL are saved when the
+  issue is queued, so a restart resumes queued, running, and open-PR runs with
+  no recovery logic. A partial unique index enforces one active run per issue,
+  which makes every path that enqueues work safe to repeat.
+- **Devin's API has no idempotency keys, so the service compensates.** The
+  dispatcher marks a run as running before it calls the API; if the process
+  dies in between, a sweep fails the stale claim rather than starting a second
+  session. If session creation fails ambiguously (a 5xx or a timeout), the
+  client looks for a session already carrying the run's `issue-N` tag and
+  adopts it.
+- **Structured output drives state.** Sessions must report through Devin's
+  structured-output tool before they finish. State transitions read that JSON;
+  nothing parses logs.
+- **Humans merge, always.** Devin opens PRs and never merges. "Needs human" is
+  a normal outcome with a comment explaining why, and the approval flow turns a
+  reviewer's comment into the next session's instructions.
+- **GitHub is the second source of truth.** Every state is a label and every
+  result is a comment. In finalize, labels change before the database row does,
+  so a crash mid-way cannot let the poller pick the issue up twice.
+- **Polling, not webhooks.** A 60-second poll is the only ingress. It needs no
+  public endpoint, no tunnel, and no inbound attack surface, and a minute of
+  latency is irrelevant for backlog work. A webhook path existed and was
+  removed as unused.
 
 ## API
 
-- `GET /api/v1/runs` - all runs with session/PR links, outcomes, ACUs
-- `GET /api/v1/runs/{id}` - one run; `GET /api/v1/runs/{id}/events` - its event timeline
-- `GET /api/v1/issues` - per-issue aggregates (latest state, attempts, reports, events)
-- `GET /api/v1/metrics` - counts by state, funnel, fix/acceptance/failed rates, latency medians, ACU totals and per-unit metrics, runs at cap
-- `POST /simulate/issue` - inject an issue (SIMULATE only)
-- `GET /healthz`
+| Endpoint                          | Returns                                                                          |
+| --------------------------------- | -------------------------------------------------------------------------------- |
+| `GET /api/v1/runs`                | All runs with session and PR links, verdicts, ACUs.                              |
+| `GET /api/v1/runs/{id}`           | One run. `GET /api/v1/runs/{id}/events` returns its event timeline.              |
+| `GET /api/v1/issues`              | Per-issue rollups: latest state, attempts, each run's report and events.         |
+| `GET /api/v1/metrics`             | Counts by state, funnel, rates, latency medians, session minutes, ACU totals.    |
+| `POST /simulate/issue`            | Inject an issue (simulate mode only). Body: `number`, `title`, `body`, optional `outcome`, `approved`. |
+| `GET /healthz`                    | Liveness and current mode.                                                       |
+
+## Project layout
+
+```
+app/
+  main.py      FastAPI app, background loops, API routes
+  service.py   Orchestration (enqueue, dispatch, poll, finalize, merge check) and metrics
+  store.py     SQLite schema and queries
+  devin.py     Devin v3 API client and the simulated client
+  github.py    GitHub REST client and the no-op client for simulate mode
+  prompt.py    The session prompt and structured-output schema
+  config.py    Environment settings
+dashboard/
+  app.py       Streamlit dashboard
+tests/         pytest suite; runs entirely in simulate mode
+```
 
 ## Tests
 
